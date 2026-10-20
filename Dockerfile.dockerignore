@@ -1,0 +1,11 @@
+# Build context is the parent dir: send only the two projects, never secrets.
+*
+!pywebtop
+!webtop-bot
+**/.env
+**/.envrc
+**/.git
+**/.venv
+**/data
+**/__pycache__
+**/*.egg-info

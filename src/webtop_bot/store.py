@@ -1,0 +1,278 @@
+"""SQLite storage: known kids, homework tasks (and their To Do ids), lesson topics."""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional
+
+from .homework import Kid, Lesson
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS kids (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    class_code INTEGER,
+    class_number INTEGER
+);
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY,
+    key TEXT NOT NULL UNIQUE,
+    kid_id TEXT NOT NULL,
+    lesson_date TEXT NOT NULL,
+    due_date TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    text TEXT NOT NULL,
+    source TEXT NOT NULL,              -- homework | topic | manual
+    completed INTEGER NOT NULL DEFAULT 0,
+    notified INTEGER NOT NULL DEFAULT 0,
+    todo_list_id TEXT,
+    todo_task_id TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS topics (
+    id INTEGER PRIMARY KEY,
+    key TEXT NOT NULL UNIQUE,
+    kid_id TEXT NOT NULL,
+    lesson_date TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    text TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS lessons (
+    id INTEGER PRIMARY KEY,
+    kid_id TEXT NOT NULL,
+    date TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    subject TEXT NOT NULL,
+    teacher TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    homework TEXT NOT NULL,
+    files INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS lessons_by_date ON lessons (date, kid_id);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS todo_lists (
+    kid_id TEXT PRIMARY KEY,
+    list_id TEXT NOT NULL
+);
+"""
+
+
+def item_key(kid_id: str, date: dt.date, subject: str, text: str) -> str:
+    return hashlib.sha1(f"{kid_id}|{date}|{subject}|{text}".encode()).hexdigest()
+
+
+@dataclass
+class Task:
+    id: int
+    kid_id: str
+    kid_name: str
+    lesson_date: dt.date
+    due_date: dt.date
+    subject: str
+    text: str
+    source: str
+    completed: bool
+    todo_list_id: Optional[str]
+    todo_task_id: Optional[str]
+
+    @property
+    def title(self) -> str:
+        return f"{self.subject}: {self.text}" if self.subject else self.text
+
+
+@dataclass
+class Topic:
+    id: int
+    kid_id: str
+    lesson_date: dt.date
+    subject: str
+    text: str
+
+
+_TASK_SELECT = """
+SELECT t.id, t.kid_id, k.name, t.lesson_date, t.due_date, t.subject, t.text, t.source,
+       t.completed, t.todo_list_id, t.todo_task_id
+FROM tasks t JOIN kids k ON k.id = t.kid_id
+"""
+
+
+def _task(row: sqlite3.Row) -> Task:
+    return Task(
+        id=row[0],
+        kid_id=row[1],
+        kid_name=row[2],
+        lesson_date=dt.date.fromisoformat(row[3]),
+        due_date=dt.date.fromisoformat(row[4]),
+        subject=row[5],
+        text=row[6],
+        source=row[7],
+        completed=bool(row[8]),
+        todo_list_id=row[9],
+        todo_task_id=row[10],
+    )
+
+
+class Store:
+    def __init__(self, path: Path):
+        self._db = sqlite3.connect(path)
+        self._db.executescript(SCHEMA)
+        self._db.commit()
+
+    # kids
+
+    def upsert_kid(self, kid: Kid) -> None:
+        self._db.execute(
+            "INSERT INTO kids (id, name, class_code, class_number) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET name=excluded.name, class_code=excluded.class_code, "
+            "class_number=excluded.class_number",
+            (kid.id, kid.name, kid.class_code, kid.class_number),
+        )
+        self._db.commit()
+
+    def kids(self) -> List[Kid]:
+        rows = self._db.execute("SELECT id, name, class_code, class_number FROM kids ORDER BY name")
+        return [Kid(*row) for row in rows]
+
+    # lessons (local copy of Webtop)
+
+    def replace_lessons(self, kid: Kid, days: List[dt.date], lessons: List[Lesson]) -> None:
+        """Store `lessons` as the full content of `days` for `kid`."""
+        with self._db:
+            self._db.executemany(
+                "DELETE FROM lessons WHERE kid_id = ? AND date = ?", [(kid.id, d.isoformat()) for d in days]
+            )
+            self._db.executemany(
+                "INSERT INTO lessons (kid_id, date, hour, subject, teacher, topic, homework, files) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (kid.id, l.date.isoformat(), l.hour, l.subject, l.teacher, l.topic, l.homework, l.files)
+                    for l in lessons
+                ],
+            )
+
+    def lessons(self, kid: Kid, days: List[dt.date]) -> List[Lesson]:
+        marks = ",".join("?" * len(days))
+        rows = self._db.execute(
+            f"SELECT date, hour, subject, teacher, topic, homework, files FROM lessons "
+            f"WHERE kid_id = ? AND date IN ({marks}) ORDER BY date, hour, id",
+            (kid.id, *(d.isoformat() for d in days)),
+        )
+        return [Lesson(kid, dt.date.fromisoformat(r[0]), *r[1:]) for r in rows]
+
+    # meta (sync bookkeeping)
+
+    def get_meta(self, key: str) -> Optional[str]:
+        row = self._db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self._db.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        self._db.commit()
+
+    # tasks
+
+    def has_tasks(self) -> bool:
+        return self._db.execute("SELECT 1 FROM tasks LIMIT 1").fetchone() is not None
+
+    def add_task(
+        self,
+        kid_id: str,
+        lesson_date: dt.date,
+        due_date: dt.date,
+        subject: str,
+        text: str,
+        source: str,
+        notified: bool = False,
+    ) -> tuple[Task, bool]:
+        """Insert a task unless the same one exists. Returns (task, created)."""
+        key = item_key(kid_id, lesson_date, subject, text)
+        cur = self._db.execute(
+            "INSERT OR IGNORE INTO tasks (key, kid_id, lesson_date, due_date, subject, text, source, notified) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (key, kid_id, lesson_date.isoformat(), due_date.isoformat(), subject, text, source, int(notified)),
+        )
+        self._db.commit()
+        row = self._db.execute(_TASK_SELECT + "WHERE t.key = ?", (key,)).fetchone()
+        return _task(row), cur.rowcount == 1
+
+    def task(self, task_id: int) -> Optional[Task]:
+        row = self._db.execute(_TASK_SELECT + "WHERE t.id = ?", (task_id,)).fetchone()
+        return _task(row) if row else None
+
+    def task_for(self, kid_id: str, date: dt.date, subject: str, text: str) -> Optional[Task]:
+        row = self._db.execute(
+            _TASK_SELECT + "WHERE t.key = ?", (item_key(kid_id, date, subject, text),)
+        ).fetchone()
+        return _task(row) if row else None
+
+    def open_tasks(self, due_from: Optional[dt.date] = None) -> List[Task]:
+        sql = _TASK_SELECT + "WHERE t.completed = 0"
+        params: tuple = ()
+        if due_from:
+            sql += " AND t.due_date >= ?"
+            params = (due_from.isoformat(),)
+        rows = self._db.execute(sql + " ORDER BY t.due_date, k.name, t.id", params)
+        return [_task(r) for r in rows]
+
+    def unnotified_tasks(self) -> List[Task]:
+        rows = self._db.execute(_TASK_SELECT + "WHERE t.notified = 0 ORDER BY k.name, t.lesson_date, t.id")
+        return [_task(r) for r in rows]
+
+    def tasks_without_todo(self) -> List[Task]:
+        rows = self._db.execute(_TASK_SELECT + "WHERE t.todo_task_id IS NULL AND t.completed = 0")
+        return [_task(r) for r in rows]
+
+    def mark_notified(self, task_ids: List[int]) -> None:
+        self._db.executemany("UPDATE tasks SET notified = 1 WHERE id = ?", [(i,) for i in task_ids])
+        self._db.commit()
+
+    def set_completed(self, task_id: int, completed: bool = True) -> None:
+        self._db.execute("UPDATE tasks SET completed = ? WHERE id = ?", (int(completed), task_id))
+        self._db.commit()
+
+    def set_todo_ids(self, task_id: int, list_id: str, todo_task_id: str) -> None:
+        self._db.execute(
+            "UPDATE tasks SET todo_list_id = ?, todo_task_id = ? WHERE id = ?", (list_id, todo_task_id, task_id)
+        )
+        self._db.commit()
+
+    # topics
+
+    def add_topic(self, kid_id: str, date: dt.date, subject: str, text: str) -> Topic:
+        key = item_key(kid_id, date, subject, text)
+        self._db.execute(
+            "INSERT OR IGNORE INTO topics (key, kid_id, lesson_date, subject, text) VALUES (?, ?, ?, ?, ?)",
+            (key, kid_id, date.isoformat(), subject, text),
+        )
+        self._db.commit()
+        row = self._db.execute("SELECT id FROM topics WHERE key = ?", (key,)).fetchone()
+        return Topic(row[0], kid_id, date, subject, text)
+
+    def topic(self, topic_id: int) -> Optional[Topic]:
+        row = self._db.execute(
+            "SELECT id, kid_id, lesson_date, subject, text FROM topics WHERE id = ?", (topic_id,)
+        ).fetchone()
+        return Topic(row[0], row[1], dt.date.fromisoformat(row[2]), row[3], row[4]) if row else None
+
+    # To Do lists
+
+    def todo_list_id(self, kid_id: str) -> Optional[str]:
+        row = self._db.execute("SELECT list_id FROM todo_lists WHERE kid_id = ?", (kid_id,)).fetchone()
+        return row[0] if row else None
+
+    def set_todo_list_id(self, kid_id: str, list_id: str) -> None:
+        self._db.execute(
+            "INSERT INTO todo_lists (kid_id, list_id) VALUES (?, ?) "
+            "ON CONFLICT(kid_id) DO UPDATE SET list_id=excluded.list_id",
+            (kid_id, list_id),
+        )
+        self._db.commit()
