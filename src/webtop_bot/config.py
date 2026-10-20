@@ -44,7 +44,7 @@ class Config:
     webtop_password: str
     webtop_data: Optional[str]
     telegram_token: str
-    allowed_chat_ids: FrozenSet[int]
+    admin_ids: FrozenSet[int]  # always allowed; can /allow other users (stored in the db)
     ms_client_id: Optional[str]
     data_dir: Path
     tz: ZoneInfo
@@ -57,13 +57,14 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
-        chat_ids = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "")
+        # TELEGRAM_ALLOWED_CHAT_IDS is the old name, still accepted.
+        admins = os.environ.get("TELEGRAM_ADMIN_IDS") or os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "")
         return cls(
             webtop_username=required("WEBTOP_USERNAME"),
             webtop_password=required("WEBTOP_PASSWORD"),
             webtop_data=os.environ.get("WEBTOP_DATA") or None,
             telegram_token=required("TELEGRAM_BOT_TOKEN"),
-            allowed_chat_ids=frozenset(int(c) for c in chat_ids.replace(" ", "").split(",") if c),
+            admin_ids=frozenset(int(c) for c in admins.replace(" ", "").split(",") if c),
             ms_client_id=os.environ.get("MS_CLIENT_ID") or None,
             data_dir=data_dir(),
             tz=ZoneInfo(os.environ.get("BOT_TIMEZONE", "Asia/Jerusalem")),

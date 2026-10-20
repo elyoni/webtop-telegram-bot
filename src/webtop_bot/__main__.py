@@ -37,8 +37,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from .todo import TodoClient
 
     cfg = Config.from_env()
-    if not cfg.allowed_chat_ids:
-        logging.warning("TELEGRAM_ALLOWED_CHAT_IDS is empty: only /start will answer (to show your chat id)")
+    if not cfg.admin_ids:
+        logging.warning("TELEGRAM_ADMIN_IDS is empty: only /start will answer (to show your chat id)")
     todo = TodoClient(cfg.ms_client_id, cfg.data_dir) if cfg.ms_client_id else None
     if not todo:
         logging.info("MS_CLIENT_ID not set: tasks are kept locally only")

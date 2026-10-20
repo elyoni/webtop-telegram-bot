@@ -60,6 +60,12 @@ CREATE TABLE IF NOT EXISTS todo_lists (
     kid_id TEXT PRIMARY KEY,
     list_id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,            -- Telegram user id (= private chat id)
+    name TEXT NOT NULL DEFAULT '',
+    added_by INTEGER,
+    added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -262,6 +268,25 @@ class Store:
             "SELECT id, kid_id, lesson_date, subject, text FROM topics WHERE id = ?", (topic_id,)
         ).fetchone()
         return Topic(row[0], row[1], dt.date.fromisoformat(row[2]), row[3], row[4]) if row else None
+
+    # users allowed besides the admins
+    def users(self) -> List[tuple[int, str]]:
+        return [(r[0], r[1]) for r in self._db.execute("SELECT id, name FROM users ORDER BY added_at, id")]
+
+    def user_ids(self) -> set[int]:
+        return {r[0] for r in self._db.execute("SELECT id FROM users")}
+
+    def add_user(self, user_id: int, name: str, added_by: int) -> None:
+        self._db.execute(
+            "INSERT INTO users (id, name, added_by) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name",
+            (user_id, name, added_by),
+        )
+        self._db.commit()
+
+    def remove_user(self, user_id: int) -> bool:
+        cur = self._db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        self._db.commit()
+        return cur.rowcount == 1
 
     # To Do lists
 

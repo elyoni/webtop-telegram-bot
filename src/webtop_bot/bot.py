@@ -47,6 +47,11 @@ COMMANDS = [
     BotCommand("kids", "הילדים"),
     BotCommand("help", "עזרה"),
 ]
+ADMIN_COMMANDS = COMMANDS + [
+    BotCommand("users", "משתמשים מורשים"),
+    BotCommand("allow", "הרשאה: /allow <id> [שם]"),
+    BotCommand("revoke", "הסרת הרשאה: /revoke <id>"),
+]
 
 # Persistent keyboard: button text -> command name.
 MENU_BUTTONS = {
@@ -97,6 +102,13 @@ class Bot:
         self.cfg = cfg
         self.service = service
         self.store = service.store
+        self._access_requests: set[int] = set()  # users already reported to the admins
+
+    def allowed_ids(self) -> set[int]:
+        return set(self.cfg.admin_ids) | self.store.user_ids()
+
+    def is_admin(self, user_id: int) -> bool:
+        return user_id in self.cfg.admin_ids
 
     # --- plumbing -------------------------------------------------------
 
@@ -123,6 +135,8 @@ class Bot:
         }
         for name, handler in self.commands.items():
             app.add_handler(CommandHandler(name, self._guard(handler)))
+        for name, handler in {"users": self.cmd_users, "allow": self.cmd_allow, "revoke": self.cmd_revoke}.items():
+            app.add_handler(CommandHandler(name, self._guard(handler, admin=True)))
         app.add_handler(MessageHandler(filters.Text(list(MENU_BUTTONS)), self._guard(self.on_menu)))
         app.add_handler(CallbackQueryHandler(self._guard(self.on_button)))
         app.add_error_handler(self.on_error)
@@ -140,23 +154,27 @@ class Bot:
 
     async def _post_init(self, app: Application) -> None:
         """Register the command menu for allowed chats only."""
-        for chat_id in self.cfg.allowed_chat_ids:
-            try:
-                await app.bot.set_my_commands(COMMANDS, scope=BotCommandScopeChat(chat_id))
-            except Exception as ex:
-                logger.warning("Could not set commands for chat %s: %s", chat_id, ex)
+        for chat_id in self.allowed_ids():
+            await self._set_commands(app.bot, chat_id)
+
+    async def _set_commands(self, bot, chat_id: int) -> None:
+        try:
+            commands = ADMIN_COMMANDS if self.is_admin(chat_id) else COMMANDS
+            await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id))
+        except Exception as ex:
+            logger.warning("Could not set commands for chat %s: %s", chat_id, ex)
 
     async def on_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.args = []
         await self.commands[MENU_BUTTONS[update.effective_message.text]](update, context)
 
-    def _guard(self, handler: Handler) -> Handler:
+    def _guard(self, handler: Handler, admin: bool = False) -> Handler:
         @functools.wraps(handler)
         async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             chat, user = update.effective_chat, update.effective_user
             # Both the chat and the sender must be allowed, so adding the bot to a
             # group doesn't open it to the group's other members.
-            allowed = self.cfg.allowed_chat_ids
+            allowed = set(self.cfg.admin_ids) if admin else self.allowed_ids()
             if not chat or not user or chat.id not in allowed or user.id not in allowed:
                 logger.warning("Rejected update from chat %s", chat.id if chat else None)
                 if update.callback_query:
@@ -174,7 +192,7 @@ class Bot:
             await update.effective_message.reply_text(f"⚠️ שגיאה: {e(str(context.error))[:300]}")
 
     async def broadcast(self, context: ContextTypes.DEFAULT_TYPE, text: str, buttons: Buttons = ()) -> None:
-        for chat_id in self.cfg.allowed_chat_ids:
+        for chat_id in self.allowed_ids():
             await self._send_chunks(lambda t, m: context.bot.send_message(chat_id, t, reply_markup=m), text, buttons)
 
     async def reply(self, update: Update, text: str, buttons: Buttons = ()) -> None:
@@ -247,15 +265,33 @@ class Bot:
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
-        if chat_id not in self.cfg.allowed_chat_ids:
-            await self.reply(update, f"Your chat id: <code>{chat_id}</code>\nAdd it to TELEGRAM_ALLOWED_CHAT_IDS.")
+        if chat_id not in self.allowed_ids():
+            await self.reply(update, f"Your chat id: <code>{chat_id}</code>\nThe bot admin was asked to approve it.")
+            await self._request_access(context, update)
             return
-        await update.effective_message.reply_text(
+        text = (
             "📚 <b>Webtop homework bot</b>\n"
             "/today — היום\n/tomorrow — יום הלימודים הבא\n/week — השבוע\n/date YYYY-MM-DD\n"
-            "/todo — משימות פתוחות\n/add &lt;ילד&gt; &lt;טקסט&gt; [YYYY-MM-DD]\n/sync — עדכון מ-Webtop (פעם ב-30 דק׳)\n/kids",
-            reply_markup=MENU,
+            "/todo — משימות פתוחות\n/add &lt;ילד&gt; &lt;טקסט&gt; [YYYY-MM-DD]\n/sync — עדכון מ-Webtop (פעם ב-30 דק׳)\n/kids"
         )
+        if self.is_admin(chat_id):
+            text += "\n\n<b>ניהול</b>\n/users\n/allow &lt;id&gt; [שם]\n/revoke &lt;id&gt;"
+        await update.effective_message.reply_text(text, reply_markup=MENU)
+
+    async def _request_access(self, context: ContextTypes.DEFAULT_TYPE, update: Update) -> None:
+        """Tell the admins (once per user per run) that someone asked for access."""
+        chat, user = update.effective_chat, update.effective_user
+        if chat.type != chat.PRIVATE or not user or user.id in self._access_requests:
+            return
+        self._access_requests.add(user.id)
+        name = " ".join(filter(None, [user.first_name, user.last_name]))
+        handle = f" @{user.username}" if user.username else ""
+        text = f"👤 בקשת גישה: {e(name)}{e(handle)} (<code>{user.id}</code>)\n/allow {user.id} {e(name)}"
+        for admin in self.cfg.admin_ids:
+            try:
+                await context.bot.send_message(admin, text)
+            except Exception as ex:
+                logger.warning("Could not notify admin %s: %s", admin, ex)
 
     def freshness(self) -> str:
         last = self.service.last_sync()
@@ -340,6 +376,48 @@ class Bot:
     async def cmd_kids(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         lines = [f"👦 {e(k.name)} ({k.class_label})" for k in self.store.kids()]
         await self.reply(update, "\n".join(lines) or "אין נתונים עדיין — /sync")
+
+    # --- admin ----------------------------------------------------------
+
+    async def cmd_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        lines = ["<b>מנהלים</b>"] + [f"• <code>{i}</code>" for i in sorted(self.cfg.admin_ids)]
+        lines += ["", "<b>משתמשים</b>"]
+        lines += [f"• <code>{i}</code> {e(name)}" for i, name in self.store.users()] or ["אין"]
+        await self.reply(update, "\n".join(lines))
+
+    async def cmd_allow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        try:
+            user_id = int(context.args[0])
+        except (IndexError, ValueError):
+            await self.reply(update, "Usage: /allow &lt;id&gt; [name]")
+            return
+        name = " ".join(context.args[1:])
+        self.store.add_user(user_id, name, update.effective_user.id)
+        self._access_requests.discard(user_id)
+        await self._set_commands(context.bot, user_id)
+        await self.reply(update, f"✅ <code>{user_id}</code> {e(name)} מורשה")
+        try:
+            await context.bot.send_message(user_id, "✅ קיבלת גישה לבוט. שלחו /start", reply_markup=MENU)
+        except Exception as ex:  # the user never opened a chat with the bot
+            logger.warning("Could not notify new user %s: %s", user_id, ex)
+
+    async def cmd_revoke(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        try:
+            user_id = int(context.args[0])
+        except (IndexError, ValueError):
+            await self.reply(update, "Usage: /revoke &lt;id&gt;")
+            return
+        if self.is_admin(user_id):
+            await self.reply(update, "Admins are set in TELEGRAM_ADMIN_IDS, not in the db.")
+            return
+        if not self.store.remove_user(user_id):
+            await self.reply(update, f"<code>{user_id}</code> לא ברשימה")
+            return
+        try:
+            await context.bot.delete_my_commands(scope=BotCommandScopeChat(user_id))
+        except Exception as ex:
+            logger.warning("Could not clear commands for chat %s: %s", user_id, ex)
+        await self.reply(update, f"🚫 <code>{user_id}</code> הוסר")
 
     # --- buttons --------------------------------------------------------
 

@@ -17,12 +17,16 @@ and a to-do list kept in **Microsoft To Do** (one list per kid). Built on [pyweb
 
 `/today` `/tomorrow` `/week` `/date YYYY-MM-DD` `/todo` `/add <kid> <text> [YYYY-MM-DD]` `/sync` `/kids` `/start`
 
+Admins only: `/users`, `/allow <id> [name]`, `/revoke <id>`.
+
 ## Setup
 
 1. Create a bot with @BotFather; put the token in `.env` (see `.env.example`, `chmod 600 .env`).
-2. Run the bot, send it `/start`, and add the chat id it shows to `TELEGRAM_ALLOWED_CHAT_IDS`.
-   Only listed chats get answers or alerts.
-3. Optional — Microsoft To Do:
+2. Run the bot, send it `/start`, and put the id it shows in `TELEGRAM_ADMIN_IDS`.
+3. Other users send `/start`; admins get an access request with a ready `/allow <id>` command.
+   Allowed users are stored in the db and all share the same Webtop account.
+   Only admins and allowed users get answers or alerts.
+4. Optional — Microsoft To Do:
    1. portal.azure.com → Entra ID → App registrations → New: *Personal Microsoft accounts only*, no redirect URI.
    2. Authentication → *Allow public client flows* = Yes.
    3. API permissions → Microsoft Graph → Delegated → `Tasks.ReadWrite`.
@@ -53,5 +57,6 @@ docker compose up -d
 ## Security notes
 
 - Secrets live only in `.env` (gitignored, excluded from the Docker build context).
-- The bot ignores every chat not in `TELEGRAM_ALLOWED_CHAT_IDS`.
+- The bot ignores every chat that is not an admin (`TELEGRAM_ADMIN_IDS`) or an allowed user (db);
+  in groups, both the group and the sender must be allowed.
 - `httpx` request logging is silenced because Telegram API URLs contain the bot token.
