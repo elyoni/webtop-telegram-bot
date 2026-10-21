@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from webtop import WebtopClient
 
 from .config import Config
+
+logger = logging.getLogger(__name__)
 
 
 def kid_id(name: str) -> str:
@@ -43,6 +46,20 @@ class Lesson:
     files: int
 
 
+@dataclass(frozen=True)
+class Event:
+    """A teacher's note on a kid: "מילה טובה", missing equipment, etc."""
+    id: int  # Webtop's eventID
+    kid_id: str
+    date: dt.date
+    type: str
+    positive: bool
+    subject: str
+    teacher: str
+    hour: int
+    remark: str
+
+
 def week_start(day: dt.date) -> dt.date:
     """The Sunday that starts the school week containing `day`."""
     return day - dt.timedelta(days=(day.weekday() + 1) % 7)
@@ -55,6 +72,11 @@ def study_year(day: dt.date) -> int:
 
 def is_school_day(day: dt.date) -> bool:
     return day.weekday() != 5  # Saturday
+
+
+def prev_school_day(day: dt.date) -> dt.date:
+    prev = day - dt.timedelta(days=1)
+    return prev if is_school_day(prev) else prev - dt.timedelta(days=1)
 
 
 def next_school_day(day: dt.date) -> dt.date:
@@ -111,7 +133,7 @@ def _parse_day(week: Any, kid: Kid, day: dt.date) -> List[Lesson]:
     for entry in entries or []:
         if str(entry.get("date", ""))[:10] != day.isoformat():
             continue
-        return [
+        lessons = [
             Lesson(
                 kid=kid,
                 date=day,
@@ -125,13 +147,62 @@ def _parse_day(week: Any, kid: Kid, day: dt.date) -> List[Lesson]:
             for hour in entry.get("hoursData") or []
             for item in hour.get("scheduale") or []
         ]
+        return _merge_teachers(lessons)
     return []
 
 
-async def fetch_all(cfg: Config, days: Iterable[dt.date]) -> List[Tuple[Kid, List[Lesson]]]:
-    """Log in once and fetch every kid's lessons for `days`."""
+def _merge_teachers(lessons: List[Lesson]) -> List[Lesson]:
+    """Webtop lists a lesson once per teacher, often with only one copy filled in.
+    Merge each hour+subject into one lesson naming all its teachers, unless the
+    copies hold different content (then keep the filled ones, each with its teacher)."""
+    groups: Dict[Tuple[int, str], List[Lesson]] = {}
+    for lesson in lessons:
+        groups.setdefault((lesson.hour, lesson.subject), []).append(lesson)
+    merged: List[Lesson] = []
+    for group in groups.values():
+        contents = {(l.topic, l.homework, l.files): l for l in group if l.topic or l.homework or l.files}
+        if len(contents) > 1:
+            merged.extend(contents.values())
+            continue
+        teachers = " / ".join(dict.fromkeys(l.teacher for l in group if l.teacher))
+        merged.append(replace(next(iter(contents.values()), group[0]), teacher=teachers))
+    return merged
+
+
+async def fetch_events(client: WebtopClient, kid: Kid) -> Optional[List[Event]]:
+    """The kid's events this school year, or None if Webtop failed (lessons still sync)."""
+    try:
+        resp = await client.get_discipline_events(encrypted_student_id=kid.webtop_id, class_code=kid.class_code)
+        rows = resp["data"]["dataTable"]["diciplineEvents"] or []
+    except Exception as e:
+        logger.warning("Could not fetch events for %s: %s", kid.name, e)
+        return None
+    return [
+        Event(
+            id=r["eventID"],
+            kid_id=kid.id,
+            date=dt.date.fromisoformat(str(r.get("eventDate", ""))[:10]),
+            type=(r.get("eventType") or "").strip(),
+            positive=r.get("eventTypeId") == 1,  # 1 = praise ("מילה טובה")
+            subject=(r.get("subjectName") or "").strip(),
+            teacher=(r.get("teacherName") or "").strip(),
+            hour=r.get("hourNum") or 0,
+            remark=(r.get("remark") or "").strip(),
+        )
+        for r in rows
+        if r.get("eventID") and r.get("eventDate")
+    ]
+
+
+async def fetch_all(
+    cfg: Config, days: Iterable[dt.date]
+) -> List[Tuple[Kid, List[Lesson], Optional[List[Event]]]]:
+    """Log in once and fetch every kid's lessons for `days`, and their events."""
     days = list(days)
     async with make_client(cfg) as client:
         await client.login()
         kids = await fetch_kids(client)
-        return [(kid, await fetch_lessons(client, kid, days, cfg.today())) for kid in kids]
+        return [
+            (kid, await fetch_lessons(client, kid, days, cfg.today()), await fetch_events(client, kid))
+            for kid in kids
+        ]

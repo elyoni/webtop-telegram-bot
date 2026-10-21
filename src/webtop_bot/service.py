@@ -106,8 +106,10 @@ class Service:
             days = self._sync_days()
             first_run = not self.store.has_tasks()
             result = await fetch_all(self.cfg, days)
-            for kid, lessons in result:
+            for kid, lessons, events in result:
                 self.store.upsert_kid(kid)
+                if events is not None:
+                    self.store.add_events(kid.id, events)
                 self.store.replace_lessons(kid, days, lessons)
                 for lesson in lessons:
                     text = homework_text(lesson)

@@ -44,7 +44,7 @@ Your data (db, logs) lives in the `bot-data` Docker volume. Update with `git pul
 
 ## Commands
 
-`/today` `/tomorrow` `/week` `/date YYYY-MM-DD` `/todo` `/add <kid> <text> [YYYY-MM-DD]` `/sync` `/kids` `/start`
+`/today` `/yesterday` `/tomorrow` `/week` `/date YYYY-MM-DD` `/todo` `/add <kid> <text> [YYYY-MM-DD]` `/sync` `/kids` `/help`
 
 Admins only: `/users`, `/allow <id> [name]`, `/revoke <id>`.
 

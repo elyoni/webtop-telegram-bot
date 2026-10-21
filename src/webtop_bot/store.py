@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .homework import Kid, Lesson, kid_id
+from .homework import Event, Kid, Lesson, kid_id
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kids (
@@ -66,6 +66,23 @@ CREATE TABLE IF NOT EXISTS users (
     added_by INTEGER,
     added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS hidden_kids (  -- kids a Telegram user chose not to see (see /kids)
+    user_id INTEGER NOT NULL,
+    kid_id TEXT NOT NULL,
+    PRIMARY KEY (user_id, kid_id)
+);
+CREATE TABLE IF NOT EXISTS events (       -- teacher notes from Webtop ("מילה טובה", ...)
+    id INTEGER PRIMARY KEY,               -- Webtop's eventID
+    kid_id TEXT NOT NULL,
+    date TEXT NOT NULL,
+    type TEXT NOT NULL,
+    positive INTEGER NOT NULL,
+    subject TEXT NOT NULL,
+    teacher TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    remark TEXT NOT NULL,
+    notified INTEGER NOT NULL DEFAULT 0   -- shown in a daily summary
+);
 """
 
 
@@ -99,6 +116,7 @@ class Topic:
     lesson_date: dt.date
     subject: str
     text: str
+    seen: bool = False  # parents saw it and nothing is needed
 
 
 _TASK_SELECT = """
@@ -124,6 +142,10 @@ def _task(row: sqlite3.Row) -> Task:
     )
 
 
+def _topic(row: sqlite3.Row) -> Topic:
+    return Topic(row[0], row[1], dt.date.fromisoformat(row[2]), row[3], row[4], bool(row[5]))
+
+
 class Store:
     def __init__(self, path: Path):
         self._db = sqlite3.connect(path)
@@ -131,6 +153,9 @@ class Store:
         self._db.commit()
         self.orphaned_todo: List[tuple[str, str]] = []  # (list id, task id) to delete in the task app
         self._migrate_kid_ids()
+        if "seen" not in {r[1] for r in self._db.execute("PRAGMA table_info(topics)")}:
+            self._db.execute("ALTER TABLE topics ADD COLUMN seen INTEGER NOT NULL DEFAULT 0")
+            self._db.commit()
 
     def _migrate_kid_ids(self) -> None:
         """Older versions keyed kids by Webtop's id, which changes on every login,
@@ -191,6 +216,51 @@ class Store:
     def kids(self) -> List[Kid]:
         rows = self._db.execute("SELECT id, name, class_code, class_number FROM kids ORDER BY name")
         return [Kid(*row) for row in rows]
+
+    def hidden_kids(self, user_id: int) -> set[str]:
+        return {r[0] for r in self._db.execute("SELECT kid_id FROM hidden_kids WHERE user_id = ?", (user_id,))}
+
+    def set_kid_hidden(self, user_id: int, kid_id: str, hidden: bool) -> None:
+        if hidden:
+            self._db.execute("INSERT OR IGNORE INTO hidden_kids (user_id, kid_id) VALUES (?, ?)", (user_id, kid_id))
+        else:
+            self._db.execute("DELETE FROM hidden_kids WHERE user_id = ? AND kid_id = ?", (user_id, kid_id))
+        self._db.commit()
+
+    # events (teacher notes)
+
+    def add_events(self, kid_id: str, events: List[Event]) -> None:
+        """Insert the kid's new events. On the kid's first fetch they count as
+        already summarized, so the bot doesn't post the whole year at once."""
+        first_run = self._db.execute("SELECT 1 FROM events WHERE kid_id = ? LIMIT 1", (kid_id,)).fetchone() is None
+        self._db.executemany(
+            "INSERT INTO events (id, kid_id, date, type, positive, subject, teacher, hour, remark, notified) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+            "type=excluded.type, subject=excluded.subject, teacher=excluded.teacher, remark=excluded.remark",
+            [
+                (ev.id, ev.kid_id, ev.date.isoformat(), ev.type, int(ev.positive), ev.subject, ev.teacher,
+                 ev.hour, ev.remark, int(first_run))
+                for ev in events
+            ],
+        )
+        self._db.commit()
+
+    def events(self, days: List[dt.date] = (), unnotified: bool = False) -> List[Event]:
+        """Events on `days`, plus (with unnotified=True) any not yet summarized."""
+        marks = ",".join("?" * len(days))
+        where = [f"date IN ({marks})"] if days else []
+        if unnotified:
+            where.append("notified = 0")
+        rows = self._db.execute(
+            "SELECT id, kid_id, date, type, positive, subject, teacher, hour, remark FROM events "
+            f"WHERE {' OR '.join(where) or '0'} ORDER BY date, hour, id",
+            tuple(d.isoformat() for d in days),
+        )
+        return [Event(r[0], r[1], dt.date.fromisoformat(r[2]), r[3], bool(r[4]), *r[5:]) for r in rows]
+
+    def mark_events_notified(self, event_ids: List[int]) -> None:
+        self._db.executemany("UPDATE events SET notified = 1 WHERE id = ?", [(i,) for i in event_ids])
+        self._db.commit()
 
     # lessons (local copy of Webtop)
 
@@ -328,14 +398,24 @@ class Store:
             (key, kid_id, date.isoformat(), subject, text),
         )
         self._db.commit()
-        row = self._db.execute("SELECT id FROM topics WHERE key = ?", (key,)).fetchone()
-        return Topic(row[0], kid_id, date, subject, text)
+        return self.find_topic(kid_id, date, subject, text)
+
+    def find_topic(self, kid_id: str, date: dt.date, subject: str, text: str) -> Optional[Topic]:
+        row = self._db.execute(
+            "SELECT id, kid_id, lesson_date, subject, text, seen FROM topics WHERE key = ?",
+            (item_key(kid_id, date, subject, text),),
+        ).fetchone()
+        return _topic(row) if row else None
 
     def topic(self, topic_id: int) -> Optional[Topic]:
         row = self._db.execute(
-            "SELECT id, kid_id, lesson_date, subject, text FROM topics WHERE id = ?", (topic_id,)
+            "SELECT id, kid_id, lesson_date, subject, text, seen FROM topics WHERE id = ?", (topic_id,)
         ).fetchone()
-        return Topic(row[0], row[1], dt.date.fromisoformat(row[2]), row[3], row[4]) if row else None
+        return _topic(row) if row else None
+
+    def set_topic_seen(self, topic_id: int, seen: bool = True) -> None:
+        self._db.execute("UPDATE topics SET seen = ? WHERE id = ?", (int(seen), topic_id))
+        self._db.commit()
 
     # users allowed besides the admins
     def users(self) -> List[tuple[int, str]]:
