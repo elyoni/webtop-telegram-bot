@@ -1,8 +1,6 @@
 services:
   bot:
-    build:
-      context: ..
-      dockerfile: webtop-bot/Dockerfile
+    build: .
     env_file: .env
     volumes:
       - bot-data:/data
