@@ -26,14 +26,20 @@ Admins only: `/users`, `/allow <id> [name]`, `/revoke <id>`.
 3. Other users send `/start`; admins get an access request with a ready `/allow <id>` command.
    Allowed users are stored in the db and all share the same Webtop account.
    Only admins and allowed users get answers or alerts.
-4. Optional — Microsoft To Do:
+4. Optional — Todoist (easiest; projects can be shared with family):
+   Todoist → Settings → Integrations → Developer → copy the API token into `TODOIST_TOKEN`.
+   The bot creates one project "שיעורי בית" with a section per kid (free plan: 5 projects); share it from the Todoist app.
+   If both `TODOIST_TOKEN` and `MS_CLIENT_ID` are set, Todoist is used.
+   Every `TODO_POLL_MINUTES` (default 10) the bot mirrors the app: tasks added in a kid's section are
+   announced in Telegram, and done / reopened / deleted (= done) status is copied. Edits in the app are not.
+5. Optional — Microsoft To Do (needs an Azure directory; personal accounts alone can no longer register apps):
    1. portal.azure.com → Entra ID → App registrations → New: *Personal Microsoft accounts only*, no redirect URI.
    2. Authentication → *Allow public client flows* = Yes.
    3. API permissions → Microsoft Graph → Delegated → `Tasks.ReadWrite`.
    4. Put the Application (client) ID in `MS_CLIENT_ID`, then run `webtop-bot login-microsoft` once
       and follow the device-code prompt. The token cache is stored in `DATA_DIR` (mode 600).
 
-   Without `MS_CLIENT_ID`, tasks are tracked only in the bot's SQLite db.
+   Without `TODOIST_TOKEN` or `MS_CLIENT_ID`, tasks are tracked only in the bot's SQLite db.
 
 ### Run locally
 

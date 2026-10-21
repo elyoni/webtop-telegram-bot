@@ -45,6 +45,7 @@ class Config:
     webtop_data: Optional[str]
     telegram_token: str
     admin_ids: FrozenSet[int]  # always allowed; can /allow other users (stored in the db)
+    todoist_token: Optional[str]  # takes precedence over ms_client_id
     ms_client_id: Optional[str]
     data_dir: Path
     tz: ZoneInfo
@@ -52,6 +53,7 @@ class Config:
     reminder_time: dt.time
     sync_times: Tuple[dt.time, ...]
     sync_cooldown_minutes: int
+    todo_poll_minutes: int  # task-app check interval; 0 = only with Webtop updates
     sync_weeks_back: int
     sync_weeks_ahead: int
 
@@ -65,13 +67,15 @@ class Config:
             webtop_data=os.environ.get("WEBTOP_DATA") or None,
             telegram_token=required("TELEGRAM_BOT_TOKEN"),
             admin_ids=frozenset(int(c) for c in admins.replace(" ", "").split(",") if c),
-            ms_client_id=os.environ.get("MS_CLIENT_ID") or None,
+            todoist_token=os.environ.get("TODOIST_TOKEN", "").strip() or None,
+            ms_client_id=os.environ.get("MS_CLIENT_ID", "").strip() or None,
             data_dir=data_dir(),
             tz=ZoneInfo(os.environ.get("BOT_TIMEZONE", "Asia/Jerusalem")),
             digest_time=_time("DIGEST_TIME", "16:00"),
             reminder_time=_time("REMINDER_TIME", "20:00"),
             sync_times=_times("SYNC_TIMES", "07:00,15:30"),
             sync_cooldown_minutes=int(os.environ.get("SYNC_COOLDOWN_MINUTES", "30")),
+            todo_poll_minutes=int(os.environ.get("TODO_POLL_MINUTES", "10")),
             sync_weeks_back=int(os.environ.get("SYNC_WEEKS_BACK", "1")),
             sync_weeks_ahead=int(os.environ.get("SYNC_WEEKS_AHEAD", "1")),
         )

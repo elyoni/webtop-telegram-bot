@@ -148,14 +148,18 @@ class Bot:
         jq.run_daily(self.job_reminder, self.cfg.reminder_time.replace(tzinfo=self.cfg.tz), days=(0, 1, 2, 3, 4, 6))
         for at in self.cfg.sync_times:
             jq.run_daily(self.job_sync, at.replace(tzinfo=self.cfg.tz))
+        if self.service.todo and self.cfg.todo_poll_minutes:
+            jq.run_repeating(self.job_todo_poll, interval=self.cfg.todo_poll_minutes * 60, first=60)
         if not self.service.last_sync():
             jq.run_once(self.job_sync, when=5)  # first start: fill the db
         return app
 
     async def _post_init(self, app: Application) -> None:
-        """Register the command menu for allowed chats only."""
+        """Register the command menu for allowed chats only; push pending tasks to the task app."""
         for chat_id in self.allowed_ids():
             await self._set_commands(app.bot, chat_id)
+        await self.service.delete_orphans()
+        await self.service.push_to_todo()  # e.g. after switching the task app
 
     async def _set_commands(self, bot, chat_id: int) -> None:
         try:
@@ -254,6 +258,7 @@ class Bot:
     def render_tasks(tasks: List[Task], title: str) -> Tuple[str, Buttons]:
         lines = [f"<b>{title}</b>"]
         kid = None
+        tasks = sorted(tasks, key=lambda t: (t.kid_name, t.due_date, t.id))  # one block per kid
         for task in tasks:
             if task.kid_name != kid:
                 kid = task.kid_name
@@ -327,7 +332,7 @@ class Bot:
         await self._show(update, [day])
 
     async def cmd_todo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self.service.pull_completion()
+        await self._pull_from_todo(context)
         tasks = self.store.open_tasks(due_from=self.cfg.today() - dt.timedelta(days=7))
         if not tasks:
             await self.reply(update, "🎉 אין משימות פתוחות")
@@ -424,10 +429,10 @@ class Bot:
     async def on_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         action, _, raw_id = (query.data or "").partition(":")
-        if action == "done":
-            task = await self.service.complete(int(raw_id))
-            await query.answer("✅ סומן כבוצע" if task else "Task not found")
-        elif action == "topic":
+        if action in ("done", "undo"):
+            await self._toggle_done(query, int(raw_id), done=action == "done")
+            return
+        if action == "topic":
             topic = self.store.topic(int(raw_id))
             if not topic:
                 await query.answer("Topic not found")
@@ -443,12 +448,44 @@ class Bot:
         remaining = [b for row in rows for b in row if b.callback_data != query.data]
         await query.edit_message_reply_markup(keyboard(remaining))
 
+    async def _toggle_done(self, query, task_id: int, done: bool) -> None:
+        """Mark done / undo, swapping the pressed button between ✅ and ↩️."""
+        task = await self.service.complete(task_id, completed=done)
+        if not task:
+            await query.answer("Task not found")
+            return
+        await query.answer("✅ סומן כבוצע" if done else "↩️ הסימון בוטל")
+
+        def swap(button: InlineKeyboardButton) -> InlineKeyboardButton:
+            if button.callback_data != query.data:
+                return button
+            label = button.text.split(" ", 1)[-1]  # drop the ✅ / ↩️ prefix
+            if done:
+                return InlineKeyboardButton(f"↩️ {label}", callback_data=f"undo:{task.id}")
+            return InlineKeyboardButton(f"✅ {label}", callback_data=f"done:{task.id}")
+
+        rows = query.message.reply_markup.inline_keyboard if query.message.reply_markup else ()
+        await query.edit_message_reply_markup(InlineKeyboardMarkup([[swap(b) for b in row] for row in rows]))
+
     # --- jobs -----------------------------------------------------------
 
     async def _announce(self, context: ContextTypes.DEFAULT_TYPE, tasks: List[Task]) -> None:
-        text, buttons = self.render_tasks(tasks, "🆕 שיעורי בית חדשים")
-        await self.broadcast(context, text, buttons)
+        homework = [t for t in tasks if t.source != "app"]
+        from_app = [t for t in tasks if t.source == "app"]
+        for group, title in ((homework, "🆕 שיעורי בית חדשים"), (from_app, "🆕 משימות חדשות מהאפליקציה")):
+            if group:
+                await self.broadcast(context, *self.render_tasks(group, title))
         self.store.mark_notified([t.id for t in tasks])
+
+    async def _pull_from_todo(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Sync status from the task app and announce tasks created there."""
+        imported = await self.service.pull_from_todo()
+        if imported:
+            await self._announce(context, imported)
+
+    async def job_todo_poll(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self.service.push_to_todo()  # retries earlier failures
+        await self._pull_from_todo(context)
 
     async def job_sync(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
@@ -468,7 +505,7 @@ class Bot:
         await self.broadcast(context, f"📚 <b>סיכום {day_label(today)}</b>\n\n{text}\n\n{self.freshness()}", buttons)
 
     async def job_reminder(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self.service.pull_completion()
+        await self._pull_from_todo(context)
         tasks = [t for t in self.store.open_tasks(due_from=self.cfg.today())
                  if t.due_date <= next_school_day(self.cfg.today())]
         if tasks:

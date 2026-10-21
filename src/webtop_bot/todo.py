@@ -6,7 +6,7 @@ import datetime as dt
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import msal
@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 AUTHORITY = "https://login.microsoftonline.com/consumers"
 SCOPES = ["Tasks.ReadWrite"]  # msal adds offline_access itself
 GRAPH = "https://graph.microsoft.com/v1.0"
+LIST_PREFIX = "שיעורי בית - "
 
 
 class TodoAuthError(RuntimeError):
@@ -80,8 +81,9 @@ class TodoClient:
             raise RuntimeError(f"Graph {method} {path.split('?')[0]} failed: HTTP {resp.status_code}")
         return resp
 
-    async def ensure_list(self, name: str) -> str:
-        """Id of the To Do list named `name`, creating it if missing."""
+    async def ensure_list(self, kid_name: str) -> str:
+        """Id of the kid's To Do list ("שיעורי בית - <kid>"), creating it if missing."""
+        name = f"{LIST_PREFIX}{kid_name}"
         resp = await self._request("GET", "/me/todo/lists")
         for item in resp.json().get("value", []):
             if item.get("displayName") == name:
@@ -101,10 +103,25 @@ class TodoClient:
         resp = await self._request("POST", f"/me/todo/lists/{list_id}/tasks", json=payload)
         return resp.json()["id"]
 
+    async def open_tasks(self, list_id: str) -> List[Tuple[str, str, Optional[dt.date]]]:
+        tasks: List[Dict[str, Any]] = []
+        url = f"/me/todo/lists/{list_id}/tasks?$filter=status ne 'completed'"
+        while url:
+            data = (await self._request("GET", url)).json()
+            tasks += data.get("value", [])
+            url = data.get("@odata.nextLink")  # absolute URL; httpx ignores base_url for it
+        return [
+            (t["id"], t["title"], dt.date.fromisoformat(t["dueDateTime"]["dateTime"][:10]) if t.get("dueDateTime") else None)
+            for t in tasks
+        ]
+
     async def task_status(self, list_id: str, task_id: str) -> Optional[str]:
         """'completed', 'notStarted', ... or None if the task was deleted."""
         resp = await self._request("GET", f"/me/todo/lists/{list_id}/tasks/{task_id}")
         return None if resp.status_code == 404 else resp.json().get("status")
+
+    async def delete_task(self, list_id: str, task_id: str) -> None:
+        await self._request("DELETE", f"/me/todo/lists/{list_id}/tasks/{task_id}")
 
     async def set_completed(self, list_id: str, task_id: str, completed: bool = True) -> None:
         status = "completed" if completed else "notStarted"

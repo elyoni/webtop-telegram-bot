@@ -6,9 +6,9 @@ import hashlib
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from .homework import Kid, Lesson
+from .homework import Kid, Lesson, kid_id
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kids (
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     due_date TEXT NOT NULL,
     subject TEXT NOT NULL,
     text TEXT NOT NULL,
-    source TEXT NOT NULL,              -- homework | topic | manual
+    source TEXT NOT NULL,              -- homework | topic | manual | app (created in the task app)
     completed INTEGER NOT NULL DEFAULT 0,
     notified INTEGER NOT NULL DEFAULT 0,
     todo_list_id TEXT,
@@ -129,6 +129,53 @@ class Store:
         self._db = sqlite3.connect(path)
         self._db.executescript(SCHEMA)
         self._db.commit()
+        self.orphaned_todo: List[tuple[str, str]] = []  # (list id, task id) to delete in the task app
+        self._migrate_kid_ids()
+
+    def _migrate_kid_ids(self) -> None:
+        """Older versions keyed kids by Webtop's id, which changes on every login,
+        so a kid could appear several times. Merge them under the stable kid_id()."""
+        db = self._db
+        rows = db.execute("SELECT id, name FROM kids ORDER BY rowid").fetchall()  # oldest first
+        old_ids: Dict[str, List[str]] = {}
+        for old, name in rows:
+            if old != kid_id(name):
+                old_ids.setdefault(name, []).append(old)
+        for name, olds in old_ids.items():
+            new = kid_id(name)
+            # Tasks and topics: keep the oldest copy (it holds done / notified / task-app ids).
+            for table, cols in (("tasks", "lesson_date, subject, text"), ("topics", "lesson_date, subject, text")):
+                for old in olds:
+                    for row_id, date, subject, text in db.execute(
+                        f"SELECT id, {cols} FROM {table} WHERE kid_id = ? ORDER BY id", (old,)
+                    ).fetchall():
+                        key = item_key(new, dt.date.fromisoformat(date), subject, text)
+                        if db.execute(f"SELECT 1 FROM {table} WHERE key = ?", (key,)).fetchone():
+                            if table == "tasks":
+                                self.orphaned_todo += db.execute(
+                                    "SELECT todo_list_id, todo_task_id FROM tasks WHERE id = ? AND todo_task_id IS NOT NULL",
+                                    (row_id,),
+                                ).fetchall()
+                            db.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+                        else:
+                            db.execute(f"UPDATE {table} SET kid_id = ?, key = ? WHERE id = ?", (new, key, row_id))
+            # Lessons are a copy of Webtop: keep the newest login's.
+            for old in olds[:-1]:
+                db.execute("DELETE FROM lessons WHERE kid_id = ?", (old,))
+            db.execute("UPDATE lessons SET kid_id = ? WHERE kid_id = ?", (new, olds[-1]))
+            # Task-app list: keep the oldest.
+            if not db.execute("SELECT 1 FROM todo_lists WHERE kid_id = ?", (new,)).fetchone():
+                db.execute(
+                    "UPDATE todo_lists SET kid_id = ? WHERE rowid = (SELECT MIN(rowid) FROM todo_lists WHERE kid_id IN (%s))"
+                    % ",".join("?" * len(olds)), (new, *olds),
+                )
+            db.execute("DELETE FROM todo_lists WHERE kid_id IN (%s)" % ",".join("?" * len(olds)), olds)
+            db.execute(
+                "INSERT OR IGNORE INTO kids (id, name, class_code, class_number) "
+                "SELECT ?, name, class_code, class_number FROM kids WHERE id = ?", (new, olds[-1]),
+            )
+            db.execute("DELETE FROM kids WHERE id IN (%s)" % ",".join("?" * len(olds)), olds)
+        db.commit()
 
     # kids
 
@@ -233,6 +280,27 @@ class Store:
         rows = self._db.execute(_TASK_SELECT + "WHERE t.notified = 0 ORDER BY k.name, t.lesson_date, t.id")
         return [_task(r) for r in rows]
 
+    def add_app_task(self, kid_id: str, today: dt.date, due_date: dt.date, text: str,
+                     list_id: str, todo_task_id: str) -> Optional[Task]:
+        """Import a task created in the task app. Returns it, or None if already known."""
+        cur = self._db.execute(
+            "INSERT OR IGNORE INTO tasks (key, kid_id, lesson_date, due_date, subject, text, source, "
+            "todo_list_id, todo_task_id) VALUES (?, ?, ?, ?, '', ?, 'app', ?, ?)",
+            (f"app:{todo_task_id}", kid_id, today.isoformat(), due_date.isoformat(), text, list_id, todo_task_id),
+        )
+        self._db.commit()
+        return self.task(cur.lastrowid) if cur.rowcount == 1 else None
+
+    def todo_task_ids(self) -> set[str]:
+        return {r[0] for r in self._db.execute("SELECT todo_task_id FROM tasks WHERE todo_task_id IS NOT NULL")}
+
+    def done_tasks_with_todo(self, due_from: dt.date) -> List[Task]:
+        rows = self._db.execute(
+            _TASK_SELECT + "WHERE t.completed = 1 AND t.todo_task_id IS NOT NULL AND t.due_date >= ?",
+            (due_from.isoformat(),),
+        )
+        return [_task(r) for r in rows]
+
     def tasks_without_todo(self) -> List[Task]:
         rows = self._db.execute(_TASK_SELECT + "WHERE t.todo_task_id IS NULL AND t.completed = 0")
         return [_task(r) for r in rows]
@@ -289,6 +357,10 @@ class Store:
         return cur.rowcount == 1
 
     # To Do lists
+
+    def todo_lists(self) -> List[tuple[str, str]]:
+        """(kid id, list id) for every kid with a task-app list."""
+        return [(r[0], r[1]) for r in self._db.execute("SELECT kid_id, list_id FROM todo_lists")]
 
     def todo_list_id(self, kid_id: str) -> Optional[str]:
         row = self._db.execute("SELECT list_id FROM todo_lists WHERE kid_id = ?", (kid_id,)).fetchone()

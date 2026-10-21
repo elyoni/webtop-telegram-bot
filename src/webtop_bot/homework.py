@@ -10,12 +10,17 @@ from webtop import WebtopClient
 from .config import Config
 
 
+def kid_id(name: str) -> str:
+    return f"name:{name}"
+
+
 @dataclass(frozen=True)
 class Kid:
-    id: str
+    id: str  # stable, see kid_id(); Webtop's own id changes on every login
     name: str
     class_code: Optional[int]
     class_number: Optional[int]
+    webtop_id: str = ""  # encrypted per-session id, needed for API calls
 
     @property
     def first_name(self) -> str:
@@ -70,13 +75,15 @@ async def fetch_kids(client: WebtopClient) -> List[Kid]:
     children = data.get("childrens") if isinstance(data, dict) else None
     return [
         Kid(
-            id=c["id"],
-            name=f"{c.get('firstName', '')} {c.get('lastName', '')}".strip(),
+            id=kid_id(name),
+            name=name,
             class_code=c.get("classCode"),
             class_number=c.get("classNum"),
+            webtop_id=c["id"],
         )
         for c in children or []
         if c.get("id")
+        for name in [f"{c.get('firstName', '')} {c.get('lastName', '')}".strip()]
     ]
 
 
@@ -92,7 +99,7 @@ async def fetch_lessons(
             weeks[sunday] = await client.get_lessons_and_homework(
                 week_index=(sunday - week_start(today)).days // 7,
                 study_year=study_year(day),
-                encrypted_student_id=kid.id,
+                encrypted_student_id=kid.webtop_id,
                 class_code=kid.class_code,
             )
         lessons.extend(_parse_day(weeks[sunday], kid, day))

@@ -34,17 +34,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from .config import Config
     from .service import Service
     from .store import Store
-    from .todo import TodoClient
-
     cfg = Config.from_env()
     if not cfg.admin_ids:
         logging.warning("TELEGRAM_ADMIN_IDS is empty: only /start will answer (to show your chat id)")
-    todo = TodoClient(cfg.ms_client_id, cfg.data_dir) if cfg.ms_client_id else None
-    if not todo:
-        logging.info("MS_CLIENT_ID not set: tasks are kept locally only")
-    service = Service(cfg, Store(cfg.data_dir / "bot.db"), todo)
+    service = Service(cfg, Store(cfg.data_dir / "bot.db"), task_backend(cfg))
     Bot(cfg, service).build().run_polling(bootstrap_retries=-1)  # keep retrying if the network is down at boot
     return 0
+
+
+def task_backend(cfg):
+    """Todoist if TODOIST_TOKEN is set, else Microsoft To Do if MS_CLIENT_ID is set, else none."""
+    if cfg.todoist_token:
+        from .todoist import TodoistClient
+
+        if cfg.ms_client_id:
+            logging.info("Both TODOIST_TOKEN and MS_CLIENT_ID set: using Todoist")
+        logging.info("Task backend: Todoist")
+        return TodoistClient(cfg.todoist_token)
+    if cfg.ms_client_id:
+        from .todo import TodoClient
+
+        logging.info("Task backend: Microsoft To Do")
+        return TodoClient(cfg.ms_client_id, cfg.data_dir)
+    logging.info("No TODOIST_TOKEN or MS_CLIENT_ID: tasks are kept locally only")
+    return None
 
 
 if __name__ == "__main__":

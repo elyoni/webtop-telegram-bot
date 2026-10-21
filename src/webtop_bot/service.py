@@ -1,19 +1,19 @@
-"""Glue between Webtop, the local store and Microsoft To Do."""
+"""Glue between Webtop, the local store and the task app (Todoist / Microsoft To Do)."""
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional, Protocol, Tuple
 
 from .config import Config
 from .homework import Kid, Lesson, fetch_all, is_school_day, next_school_day, week_start
 from .store import Store, Task, Topic
-from .todo import TodoClient
 
 logger = logging.getLogger(__name__)
 
 KidLessons = List[Tuple[Kid, List[Lesson]]]
+REOPEN_CHECK_DAYS = 14  # done tasks due this recently are checked for being reopened in the app
 
 
 def homework_text(lesson: Lesson) -> str:
@@ -21,6 +21,22 @@ def homework_text(lesson: Lesson) -> str:
     if lesson.homework:
         return lesson.homework
     return f"📎 {lesson.files} קבצים מצורפים" if lesson.files else ""
+
+
+class TaskBackend(Protocol):
+    """A task app; implemented by todo.TodoClient and todoist.TodoistClient."""
+
+    async def ensure_list(self, kid_name: str) -> str:
+        """Id of the kid's task list, creating it if missing."""
+
+    async def list_exists(self, list_id: str) -> bool: ...
+    async def create_task(self, list_id: str, title: str, body: str, due: dt.date, tz: str) -> str: ...
+    async def open_tasks(self, list_id: str) -> List[Tuple[str, str, Optional[dt.date]]]:
+        """(task id, title, due date) of the list's open tasks."""
+
+    async def task_status(self, list_id: str, task_id: str) -> Optional[str]: ...
+    async def delete_task(self, list_id: str, task_id: str) -> None: ...
+    async def set_completed(self, list_id: str, task_id: str, completed: bool = True) -> None: ...
 
 
 class SyncBusy(Exception):
@@ -36,11 +52,12 @@ class SyncCooldown(Exception):
 
 
 class Service:
-    def __init__(self, cfg: Config, store: Store, todo: Optional[TodoClient]):
+    def __init__(self, cfg: Config, store: Store, todo: Optional[TaskBackend]):
         self.cfg = cfg
         self.store = store
         self.todo = todo
-        self._lock = asyncio.Lock()
+        self._lock = asyncio.Lock()  # Webtop refresh
+        self._todo_lock = asyncio.Lock()  # task-app push / pull
 
     # --- reading (local db only) ----------------------------------------
 
@@ -103,56 +120,94 @@ class Service:
             self.store.set_meta("range_to", days[-1].isoformat())
             self.store.set_meta("last_success", self.cfg.now().isoformat())
         await self.push_to_todo()
-        await self.pull_completion()
+        await self.pull_from_todo()  # imported tasks are unnotified, so returned below
         today = self.cfg.today()
         return [t for t in self.store.unnotified_tasks() if t.due_date >= today]
 
     async def push_to_todo(self) -> None:
         if not self.todo:
             return
-        for task in self.store.tasks_without_todo():
-            try:
-                list_id = await self._list_for(task.kid_id, task.kid_name)
-                body = f"{task.kid_name} · {task.subject} · שיעור {task.lesson_date:%d/%m}\n{task.text}"
-                todo_id = await self.todo.create_task(list_id, task.title, body, task.due_date, self.cfg.tz.key)
-                self.store.set_todo_ids(task.id, list_id, todo_id)
-            except Exception as e:
-                logger.warning("To Do push failed for task %s: %s", task.id, e)
-                return  # e.g. not logged in; retry next sync
+        async with self._todo_lock:
+            for task in self.store.tasks_without_todo():
+                try:
+                    list_id = await self._list_for(task.kid_id, task.kid_name)
+                    body = f"{task.kid_name} · {task.subject} · שיעור {task.lesson_date:%d/%m}\n{task.text}"
+                    todo_id = await self.todo.create_task(list_id, task.title, body, task.due_date, self.cfg.tz.key)
+                    self.store.set_todo_ids(task.id, list_id, todo_id)
+                except Exception as e:
+                    logger.warning("Task app push failed for task %s: %s", task.id, e)
+                    return  # e.g. not logged in; retry next sync
+
+    async def delete_orphans(self) -> None:
+        """Delete task-app copies of duplicate tasks dropped by the db migration."""
+        if not self.todo:
+            return
+        async with self._todo_lock:
+            while self.store.orphaned_todo:
+                list_id, task_id = self.store.orphaned_todo[-1]
+                try:
+                    await self.todo.delete_task(list_id, task_id)
+                except Exception as e:
+                    logger.warning("Task app delete failed: %s", e)
+                    return
+                self.store.orphaned_todo.pop()
+                logger.info("Deleted duplicate task %s from the task app", task_id)
 
     async def _list_for(self, kid_id: str, kid_name: str) -> str:
         list_id = self.store.todo_list_id(kid_id)
         if list_id and await self.todo.list_exists(list_id):
             return list_id
-        list_id = await self.todo.ensure_list(f"שיעורי בית - {kid_name.split()[0]}")
+        list_id = await self.todo.ensure_list(kid_name.split()[0])
         self.store.set_todo_list_id(kid_id, list_id)
         return list_id
 
-    async def pull_completion(self) -> None:
-        """Mark tasks done locally when they were completed (or deleted) in To Do."""
+    async def pull_from_todo(self) -> List[Task]:
+        """Mirror the task app: import tasks created there, and copy completed /
+        reopened status (a deleted task counts as done). Returns the imported tasks."""
         if not self.todo:
-            return
-        for task in self.store.open_tasks():
-            if not task.todo_task_id:
-                continue
+            return []
+        async with self._todo_lock:
             try:
-                status = await self.todo.task_status(task.todo_list_id, task.todo_task_id)
+                imported = await self._import_new()
+                for task in self.store.open_tasks():
+                    if task.todo_task_id:
+                        status = await self.todo.task_status(task.todo_list_id, task.todo_task_id)
+                        if status in (None, "completed"):
+                            self.store.set_completed(task.id)
+                recent = self.cfg.today() - dt.timedelta(days=REOPEN_CHECK_DAYS)
+                for task in self.store.done_tasks_with_todo(due_from=recent):
+                    if await self.todo.task_status(task.todo_list_id, task.todo_task_id) == "notStarted":
+                        self.store.set_completed(task.id, False)
             except Exception as e:
-                logger.warning("To Do status check failed: %s", e)
-                return
-            if status in (None, "completed"):
-                self.store.set_completed(task.id)
+                logger.warning("Task app pull failed: %s", e)
+                return []
+        return imported
 
-    async def complete(self, task_id: int) -> Optional[Task]:
+    async def _import_new(self) -> List[Task]:
+        known = self.store.todo_task_ids()
+        imported = []
+        for kid_id, list_id in self.store.todo_lists():
+            for todo_id, title, due in await self.todo.open_tasks(list_id):
+                if todo_id in known:
+                    continue
+                due = due or next_school_day(self.cfg.today())
+                task = self.store.add_app_task(kid_id, self.cfg.today(), due, title, list_id, todo_id)
+                if task:
+                    imported.append(task)
+        return imported
+
+    async def complete(self, task_id: int, completed: bool = True) -> Optional[Task]:
+        """Mark a task done, or reopen it with completed=False (undo)."""
         task = self.store.task(task_id)
         if not task:
             return None
-        self.store.set_completed(task.id)
+        self.store.set_completed(task.id, completed)
         if self.todo and task.todo_task_id:
-            try:
-                await self.todo.set_completed(task.todo_list_id, task.todo_task_id)
-            except Exception as e:
-                logger.warning("To Do complete failed: %s", e)
+            async with self._todo_lock:  # so a concurrent pull doesn't read the old status back
+                try:
+                    await self.todo.set_completed(task.todo_list_id, task.todo_task_id, completed)
+                except Exception as e:
+                    logger.warning("Task app status update failed: %s", e)
         return task
 
     async def promote_topic(self, topic: Topic) -> Task:

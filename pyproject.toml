@@ -1,7 +1,7 @@
 [project]
 name = "webtop-bot"
-version = "0.1.0"
-description = "Telegram bot: daily Webtop homework digests, synced to Microsoft To Do"
+version = "0.2.0"
+description = "Telegram bot: daily Webtop homework digests, synced to Todoist or Microsoft To Do"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
