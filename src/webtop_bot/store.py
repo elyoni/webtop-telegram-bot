@@ -109,16 +109,6 @@ class Task:
         return f"{self.subject}: {self.text}" if self.subject else self.text
 
 
-@dataclass
-class Topic:
-    id: int
-    kid_id: str
-    lesson_date: dt.date
-    subject: str
-    text: str
-    seen: bool = False  # parents saw it and nothing is needed
-
-
 _TASK_SELECT = """
 SELECT t.id, t.kid_id, k.name, t.lesson_date, t.due_date, t.subject, t.text, t.source,
        t.completed, t.todo_list_id, t.todo_task_id
@@ -142,10 +132,6 @@ def _task(row: sqlite3.Row) -> Task:
     )
 
 
-def _topic(row: sqlite3.Row) -> Topic:
-    return Topic(row[0], row[1], dt.date.fromisoformat(row[2]), row[3], row[4], bool(row[5]))
-
-
 class Store:
     def __init__(self, path: Path):
         self._db = sqlite3.connect(path)
@@ -153,9 +139,6 @@ class Store:
         self._db.commit()
         self.orphaned_todo: List[tuple[str, str]] = []  # (list id, task id) to delete in the task app
         self._migrate_kid_ids()
-        if "seen" not in {r[1] for r in self._db.execute("PRAGMA table_info(topics)")}:
-            self._db.execute("ALTER TABLE topics ADD COLUMN seen INTEGER NOT NULL DEFAULT 0")
-            self._db.commit()
 
     def _migrate_kid_ids(self) -> None:
         """Older versions keyed kids by Webtop's id, which changes on every login,
@@ -387,34 +370,6 @@ class Store:
         self._db.execute(
             "UPDATE tasks SET todo_list_id = ?, todo_task_id = ? WHERE id = ?", (list_id, todo_task_id, task_id)
         )
-        self._db.commit()
-
-    # topics
-
-    def add_topic(self, kid_id: str, date: dt.date, subject: str, text: str) -> Topic:
-        key = item_key(kid_id, date, subject, text)
-        self._db.execute(
-            "INSERT OR IGNORE INTO topics (key, kid_id, lesson_date, subject, text) VALUES (?, ?, ?, ?, ?)",
-            (key, kid_id, date.isoformat(), subject, text),
-        )
-        self._db.commit()
-        return self.find_topic(kid_id, date, subject, text)
-
-    def find_topic(self, kid_id: str, date: dt.date, subject: str, text: str) -> Optional[Topic]:
-        row = self._db.execute(
-            "SELECT id, kid_id, lesson_date, subject, text, seen FROM topics WHERE key = ?",
-            (item_key(kid_id, date, subject, text),),
-        ).fetchone()
-        return _topic(row) if row else None
-
-    def topic(self, topic_id: int) -> Optional[Topic]:
-        row = self._db.execute(
-            "SELECT id, kid_id, lesson_date, subject, text, seen FROM topics WHERE id = ?", (topic_id,)
-        ).fetchone()
-        return _topic(row) if row else None
-
-    def set_topic_seen(self, topic_id: int, seen: bool = True) -> None:
-        self._db.execute("UPDATE topics SET seen = ? WHERE id = ?", (int(seen), topic_id))
         self._db.commit()
 
     # users allowed besides the admins

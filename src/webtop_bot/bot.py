@@ -5,7 +5,7 @@ import datetime as dt
 import functools
 import html
 import logging
-from typing import Awaitable, Callable, List, Optional, Sequence, Tuple, Union
+from typing import Awaitable, Callable, List, Optional, Sequence, Tuple
 
 from telegram import (
     BotCommand,
@@ -69,7 +69,7 @@ MENU = ReplyKeyboardMarkup(
     is_persistent=True,
 )
 
-Buttons = List[Union[InlineKeyboardButton, List[InlineKeyboardButton]]]  # a list = its own row
+Buttons = List[InlineKeyboardButton]
 Handler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 Message = Tuple[str, Buttons]
 
@@ -88,16 +88,9 @@ def short(text: str, n: int = 24) -> str:
 
 
 def keyboard(buttons: Buttons) -> Optional[InlineKeyboardMarkup]:
-    """Single buttons two per row; lists keep their own row."""
-    rows: List[List[InlineKeyboardButton]] = []
-    singles: List[InlineKeyboardButton] = []
-    for item in buttons:
-        if isinstance(item, list):
-            rows.append(item)
-        else:
-            singles.append(item)
-    rows += [singles[i : i + 2] for i in range(0, len(singles), 2)]
-    return InlineKeyboardMarkup(rows) if rows else None
+    if not buttons:
+        return None
+    return InlineKeyboardMarkup([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
 
 
 def done_button(task: Task, with_kid: bool = False) -> InlineKeyboardButton:
@@ -259,7 +252,7 @@ class Bot:
     # --- formatting -----------------------------------------------------
 
     def render(
-        self, kid_lessons: Sequence[Tuple[Kid, List[Lesson]]], days: List[dt.date], with_topics: bool,
+        self, kid_lessons: Sequence[Tuple[Kid, List[Lesson]]], days: List[dt.date],
         hidden: set[str] = frozenset(), events: Optional[List[Event]] = None,
     ) -> Tuple[str, Buttons, List[int]]:
         """Text, buttons and the ids of the homework tasks shown, skipping hidden kids.
@@ -272,7 +265,6 @@ class Bot:
         parts: List[str] = []
         buttons: Buttons = []
         shown: List[int] = []
-        seen_topics: set[int] = set()  # lessons can share one topic
         for kid, lessons in kid_lessons:
             lines = [f"👦 <b>{e(kid.name)}</b> ({kid.class_label})"]
             for day in days:
@@ -287,17 +279,13 @@ class Bot:
                         self.store.task_for(kid.id, lesson.date, lesson.subject, lesson.topic)
                         if lesson.topic and not task else None
                     )
-                    status = task or promoted
-                    topic = None
-                    if lesson.topic and not status:
-                        add = self.store.add_topic if with_topics else self.store.find_topic
-                        topic = add(kid.id, lesson.date, lesson.subject, lesson.topic)
-                    # ✅ done, ⬜ open, 👌 no homework (checked by a parent), ❓ the teacher wrote no homework
+                    status = task or promoted  # promoted: a topic made a task by older versions
+                    # ✅ done, ⬜ open, no mark: class info only, ❓ the teacher wrote nothing
                     if status:
-                        mark = "✅" if status.completed else "⬜"
+                        mark = "✅ " if status.completed else "⬜ "
                     else:
-                        mark = "👌" if topic and topic.seen else "❓"
-                    line = f"{mark} {lesson.hour}. <b>{e(lesson.subject)}</b>"
+                        mark = "" if lesson.topic else "❓ "
+                    line = f"{mark}{lesson.hour}. <b>{e(lesson.subject)}</b>"
                     twins = [l for l in todays if (l.hour, l.subject) == (lesson.hour, lesson.subject)]
                     if len(twins) > 1 and lesson.teacher:  # split class: say whose lesson
                         line += f" ({e(lesson.teacher)})"
@@ -310,13 +298,6 @@ class Bot:
                             buttons.append(done_button(status, with_kid=len(kid_lessons) > 1))
                     if task:
                         lines.append(f"    <i>{e(text)}</i>")
-                    elif with_topics and topic and not topic.seen and topic.id not in seen_topics:
-                        seen_topics.add(topic.id)
-                        label = f"{kid.first_name} · {short(lesson.subject, 16)}"
-                        buttons.append([
-                            InlineKeyboardButton(f"➕ {label}", callback_data=f"topic:{topic.id}"),
-                            InlineKeyboardButton("👌 אין ש״ב", callback_data=f"seen:{topic.id}"),
-                        ])
             kid_events = [ev for ev in events if ev.kid_id == kid.id]
             if kid_events:
                 lines.append("\n<u>הערות מורים</u>")
@@ -377,13 +358,12 @@ class Bot:
             "<b>סימנים</b>\n"
             "✅ משימה בוצעה\n"
             "⬜ משימה פתוחה\n"
-            "👌 בדקנו — אין שיעורי בית בשיעור הזה\n"
-            "❓ המורה לא רשם/ה שיעורי בית (ייתכן שרשם/ה נושא)\n"
+            "בלי סימן — המורה רשם/ה רק נושא, אין שיעורי בית\n"
+            "❓ המורה לא רשם/ה כלום על השיעור\n"
             "🌟 / ⚠️ הערת מורה: חיובית / שלילית\n\n"
             "<b>כפתורים</b>\n"
             "✅ סימון משימה כבוצעה (↩️ ביטול)\n"
-            "➕ הפיכת נושא השיעור למשימה\n"
-            "👌 אין ש״ב: סימון שאין שיעורי בית בשיעור (ביטול: ↩️)"
+            "שכחנו משהו? /add"
         )
         if self.is_admin(chat_id):
             text += "\n\n<b>ניהול</b>\n/users\n/allow &lt;id&gt; [שם]\n/revoke &lt;id&gt;"
@@ -415,7 +395,7 @@ class Bot:
             await self.reply(update, f"אין נתונים שמורים לתאריך הזה (שמור: {span}).\n{self.freshness()}")
             return
         hidden = self.store.hidden_kids(update.effective_user.id)
-        text, buttons, shown = self.render(self.service.view(days), days, with_topics=len(days) == 1, hidden=hidden)
+        text, buttons, shown = self.render(self.service.view(days), days, hidden=hidden)
         self.store.mark_notified(shown)
         await self.reply(update, f"{text}\n\n{self.freshness()}", buttons)
 
@@ -554,42 +534,10 @@ class Bot:
         if action in ("done", "undo"):
             await self._toggle_done(query, int(raw_id), done=action == "done")
             return
-        if action in ("seen", "unseen"):
-            await self._toggle_seen(query, int(raw_id), seen=action == "seen")
-            return
         if action == "kid":
             await self._toggle_kid(query, raw_id)
             return
-        if action == "topic":
-            topic = self.store.topic(int(raw_id))
-            if not topic:
-                await query.answer("Topic not found")
-                return
-            task = await self.service.promote_topic(topic)
-            await query.answer("➕ נוספה משימה")
-            await query.message.reply_text(f"➕ {e(task.title)} (ל-{task.due_date:%d/%m})", reply_markup=keyboard([done_button(task)]))
-        else:
-            await query.answer()
-            return
-        # Drop the pressed button, and its 👌 partner, from the message.
-        gone = {query.data, f"seen:{raw_id}"}
-        rows = query.message.reply_markup.inline_keyboard if query.message.reply_markup else ()
-        remaining = [[b for b in row if b.callback_data not in gone] for row in rows]
-        await query.edit_message_reply_markup(InlineKeyboardMarkup([r for r in remaining if r]) if any(remaining) else None)
-
-    async def _toggle_seen(self, query, topic_id: int, seen: bool) -> None:
-        """Mark a lesson topic as seen (nothing to do) / undo."""
-        if not self.store.topic(topic_id):
-            await query.answer("Topic not found")
-            return
-        self.store.set_topic_seen(topic_id, seen)
-        await query.answer("👌 סומן: אין שיעורי בית" if seen else "↩️ הסימון בוטל")
-        new = InlineKeyboardButton("↩️ ביטול" if seen else "👌 אין ש״ב",
-                                   callback_data=f"{'unseen' if seen else 'seen'}:{topic_id}")
-        rows = query.message.reply_markup.inline_keyboard if query.message.reply_markup else ()
-        await query.edit_message_reply_markup(
-            InlineKeyboardMarkup([[new if b.callback_data == query.data else b for b in row] for row in rows])
-        )
+        await query.answer("הכפתור הזה כבר לא פעיל — /today")
 
     async def _toggle_kid(self, query, kid_id: str) -> None:
         """Show / hide a kid for the user who pressed, and redraw the /kids toggles."""
@@ -662,7 +610,7 @@ class Bot:
         def make(hidden: set[str]) -> Optional[Message]:
             if all(kid.id in hidden for kid, _ in view):
                 return None
-            text, buttons, shown = self.render(view, [today], with_topics=True, hidden=hidden, events=events)
+            text, buttons, shown = self.render(view, [today], hidden=hidden, events=events)
             self.store.mark_notified(shown)
             return f"📚 <b>סיכום {day_label(today)}</b>\n\n{text}\n\n{self.freshness()}", buttons
 

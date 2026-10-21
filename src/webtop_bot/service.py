@@ -8,7 +8,7 @@ from typing import List, Optional, Protocol, Tuple
 
 from .config import Config
 from .homework import Kid, Lesson, fetch_all, is_school_day, next_school_day, week_start
-from .store import Store, Task, Topic
+from .store import Store, Task
 
 logger = logging.getLogger(__name__)
 
@@ -210,14 +210,6 @@ class Service:
                     await self.todo.set_completed(task.todo_list_id, task.todo_task_id, completed)
                 except Exception as e:
                     logger.warning("Task app status update failed: %s", e)
-        return task
-
-    async def promote_topic(self, topic: Topic) -> Task:
-        task, _ = self.store.add_task(
-            topic.kid_id, topic.lesson_date, next_school_day(topic.lesson_date), topic.subject, topic.text,
-            source="topic", notified=True,
-        )
-        await self.push_to_todo()
         return task
 
     async def add_manual(self, kid: Kid, text: str, due: dt.date) -> Task:
