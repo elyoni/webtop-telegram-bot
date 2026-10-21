@@ -44,9 +44,12 @@ Your data (db, logs) lives in the `bot-data` Docker volume. Update with `git pul
 
 ## Commands
 
-`/today` `/yesterday` `/tomorrow` `/week` `/date YYYY-MM-DD` `/todo` `/add <kid> <text> [YYYY-MM-DD]` `/sync` `/kids` `/help`
+`/today` `/yesterday` `/tomorrow` `/week` `/date YYYY-MM-DD` `/todo` `/add <kid> <text> [YYYY-MM-DD]` `/sync` `/kids` `/config` `/help`
 
-Admins only: `/config` — buttons for users (approve / remove), daily summary and reminder times, Webtop sync times, and the Todoist interval. Changes apply at once and override the `.env` values.
+`/config` — everyone: their own daily summary and evening reminder time (or off).
+Admins also get: users (approve / remove, make ⭐ admin), Webtop sync times and the Todoist interval (bot-wide).
+`TELEGRAM_ADMIN_IDS` are permanent admins; others can be made admins from `/config`.
+Changes apply at once and override the `.env` defaults.
 
 ## Setup
 

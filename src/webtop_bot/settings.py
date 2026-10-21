@@ -1,5 +1,8 @@
-"""Settings admins change from Telegram (/config). Stored in the db's meta
-table; until changed, the .env values (Config) apply."""
+"""Settings changed from Telegram (/config).
+
+Bot-wide ones (admins): Webtop sync times, task-app interval; in the meta table.
+Per user: daily summary and evening reminder times; in user_settings.
+Until changed, the .env values (Config) apply."""
 from __future__ import annotations
 
 import datetime as dt
@@ -54,11 +57,25 @@ class Settings:
     def reminder_time(self) -> Optional[dt.time]:
         return self._time("reminder_time", self.cfg.reminder_time)
 
-    def set_time(self, name: str, value: str) -> None:
-        """name: digest_time / reminder_time; value: one of time_options(name) or 'off'."""
-        if value != OFF and value not in self.time_options(name):
+    def user_time(self, user_id: int, name: str) -> Optional[dt.time]:
+        """A user's digest_time / reminder_time (None = off); the bot default until they pick one."""
+        raw = self.store.user_setting(user_id, name)
+        if raw is None:
+            return getattr(self, name)
+        return None if raw == OFF else dt.time.fromisoformat(raw)
+
+    def set_user_time(self, user_id: int, name: str, value: str) -> None:
+        """name: digest_time / reminder_time; value: one of time_options(name, user_id) or 'off'."""
+        if value != OFF and value not in self.time_options(name, user_id):
             raise ValueError(f"{name}: unexpected value {value!r}")
-        self._set(name, value)
+        self.store.set_user_setting(user_id, name, value)
+
+    def last_digest(self, user_id: int) -> Optional[str]:
+        """When the user's last daily summary went out (store.utc_now() format)."""
+        return self.store.user_setting(user_id, "last_digest")
+
+    def set_last_digest(self, user_id: int, when: str) -> None:
+        self.store.set_user_setting(user_id, "last_digest", when)
 
     @property
     def sync_times(self) -> Tuple[dt.time, ...]:
@@ -74,10 +91,13 @@ class Settings:
         times ^= {value}
         self._set("sync_times", ",".join(sorted(times)))
 
-    def time_options(self, name: str) -> List[str]:
-        """The preset times, plus the current one if it isn't a preset."""
+    def time_options(self, name: str, user_id: Optional[int] = None) -> List[str]:
+        """The preset times, plus the current one (the user's, for per-user times) if it isn't a preset."""
         presets = {"digest_time": DIGEST_OPTIONS, "reminder_time": REMINDER_OPTIONS, "sync_times": SYNC_OPTIONS}[name]
-        current = self.sync_times if name == "sync_times" else (getattr(self, name),)
+        if name == "sync_times":
+            current = self.sync_times
+        else:
+            current = (getattr(self, name), self.user_time(user_id, name) if user_id is not None else None)
         return sorted(set(presets) | {f"{t:%H:%M}" for t in current if t})
 
     # Access requests waiting for an admin: {user id: name}.

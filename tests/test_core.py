@@ -9,9 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from webtop_bot.homework import Kid, Lesson, WebtopDataError, _checked, _merge_teachers
+from webtop_bot.homework import Event, Kid, Lesson, WebtopDataError, _checked, _merge_teachers
 from webtop_bot.settings import MAX_PENDING, Settings
-from webtop_bot.store import Store
+from webtop_bot.store import Store, utc_now
 
 DAY = dt.date(2026, 10, 20)
 DUE = dt.date(2026, 10, 21)
@@ -92,6 +92,44 @@ class TestUpsertHomework:
         assert store.task_for(KID.id, DAY, "English", "page 5") is None
 
 
+class TestUsersAndEvents:
+    def test_user_setAdmin_listedAsAdminUntilRemoved(self, store: Store) -> None:
+        # Arrange
+        store.add_user(5, "Shiri", added_by=1)
+
+        # Act
+        store.set_admin(5, True)
+        admins_before = store.admin_user_ids()
+        store.remove_user(5)
+
+        # Assert
+        assert admins_before == {5}
+        assert store.admin_user_ids() == set()
+
+    def test_firstFetch_events_haveNoStampSoTheyAreNotLate(self, store: Store) -> None:
+        # Arrange
+        old = Event(1, KID.id, dt.date(2026, 9, 1), "מילה טובה", True, "English", "A", 2, "")
+
+        # Act
+        store.add_events(KID.id, [old])
+
+        # Assert
+        assert store.events(added_after="2000-01-01") == []
+
+    def test_noteEnteredLateForEarlierDay_events_includedAfterLastDigest(self, store: Store) -> None:
+        # Arrange
+        store.add_events(KID.id, [Event(1, KID.id, dt.date(2026, 9, 1), "מילה טובה", True, "", "", 1, "")])
+        last_digest = utc_now()
+        late = Event(2, KID.id, DAY - dt.timedelta(days=3), "מילה טובה", True, "English", "A", 2, "")
+
+        # Act
+        store.add_events(KID.id, [late])
+
+        # Assert
+        assert [ev.id for ev in store.events([DAY], added_after=last_digest)] == [2]
+        assert store.events([DAY], added_after=utc_now()) == []
+
+
 class TestMergeTeachers:
     def test_copyPerTeacher_oneFilled_mergesIntoOneLessonWithBothTeachers(self) -> None:
         # Act
@@ -141,16 +179,27 @@ class TestSettings:
     def test_noOverride_read_usesEnvDefaults(self, settings: Settings) -> None:
         assert (settings.digest_time, settings.todo_poll_minutes) == (dt.time(16), 10)
 
-    def test_digestOff_read_returnsNone(self, settings: Settings) -> None:
+    def test_userWithoutChoice_read_getsBotDefault(self, settings: Settings) -> None:
+        assert settings.user_time(1, "digest_time") == dt.time(16)
+
+    def test_oneUserTurnsDigestOff_read_otherUserUnchanged(self, settings: Settings) -> None:
         # Act
-        settings.set_time("digest_time", "off")
+        settings.set_user_time(1, "digest_time", "off")
 
         # Assert
-        assert settings.digest_time is None
+        assert settings.user_time(1, "digest_time") is None
+        assert settings.user_time(2, "digest_time") == dt.time(16)
+
+    def test_userPicksTime_read_returnsIt(self, settings: Settings) -> None:
+        # Act
+        settings.set_user_time(1, "reminder_time", "21:00")
+
+        # Assert
+        assert settings.user_time(1, "reminder_time") == dt.time(21)
 
     def test_timeNotOffered_set_raises(self, settings: Settings) -> None:
         with pytest.raises(ValueError):
-            settings.set_time("digest_time", "03:17")
+            settings.set_user_time(1, "digest_time", "03:17")
 
     def test_syncTime_toggleTwice_restoresOriginal(self, settings: Settings) -> None:
         # Act

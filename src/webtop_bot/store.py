@@ -71,6 +71,12 @@ CREATE TABLE IF NOT EXISTS hidden_kids (  -- kids a Telegram user chose not to s
     kid_id TEXT NOT NULL,
     PRIMARY KEY (user_id, kid_id)
 );
+CREATE TABLE IF NOT EXISTS user_settings (  -- per-user choices (/config), e.g. digest time
+    user_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (user_id, key)
+);
 CREATE TABLE IF NOT EXISTS events (       -- teacher notes from Webtop ("מילה טובה", ...)
     id INTEGER PRIMARY KEY,               -- Webtop's eventID
     kid_id TEXT NOT NULL,
@@ -80,14 +86,17 @@ CREATE TABLE IF NOT EXISTS events (       -- teacher notes from Webtop ("מיל�
     subject TEXT NOT NULL,
     teacher TEXT NOT NULL,
     hour INTEGER NOT NULL,
-    remark TEXT NOT NULL,
-    notified INTEGER NOT NULL DEFAULT 0   -- shown in a daily summary
+    remark TEXT NOT NULL
 );
 """
 
 
 def item_key(kid_id: str, date: dt.date, subject: str, text: str) -> str:
     return hashlib.sha1(f"{kid_id}|{date}|{subject}|{text}".encode()).hexdigest()
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
 def slot_key(kid_id: str, date: dt.date, slot: str) -> str:
@@ -145,6 +154,8 @@ class Store:
         self._migrate_kid_ids()
         self._add_column("lessons", "study_group", "INTEGER NOT NULL DEFAULT 0")
         self._add_column("tasks", "todo_stale", "INTEGER NOT NULL DEFAULT 0")  # text changed since pushed
+        self._add_column("users", "is_admin", "INTEGER NOT NULL DEFAULT 0")  # besides TELEGRAM_ADMIN_IDS
+        self._add_column("events", "added_at", "TEXT NOT NULL DEFAULT ''")  # UTC ISO; '' = before the bot ran
 
     def _add_column(self, table: str, column: str, definition: str) -> None:
         if column not in {r[1] for r in self._db.execute(f"PRAGMA table_info({table})")}:
@@ -224,37 +235,38 @@ class Store:
     # events (teacher notes)
 
     def add_events(self, kid_id: str, events: List[Event]) -> None:
-        """Insert the kid's new events. On the kid's first fetch they count as
-        already summarized, so the bot doesn't post the whole year at once."""
+        """Insert the kid's new events, stamped with when the bot first saw them.
+        On the kid's first fetch they get no stamp, so summaries don't post the
+        whole year at once."""
         first_run = self._db.execute("SELECT 1 FROM events WHERE kid_id = ? LIMIT 1", (kid_id,)).fetchone() is None
+        added_at = "" if first_run else utc_now()
         self._db.executemany(
-            "INSERT INTO events (id, kid_id, date, type, positive, subject, teacher, hour, remark, notified) "
+            "INSERT INTO events (id, kid_id, date, type, positive, subject, teacher, hour, remark, added_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
             "type=excluded.type, subject=excluded.subject, teacher=excluded.teacher, remark=excluded.remark",
             [
                 (ev.id, ev.kid_id, ev.date.isoformat(), ev.type, int(ev.positive), ev.subject, ev.teacher,
-                 ev.hour, ev.remark, int(first_run))
+                 ev.hour, ev.remark, added_at)
                 for ev in events
             ],
         )
         self._db.commit()
 
-    def events(self, days: List[dt.date] = (), unnotified: bool = False) -> List[Event]:
-        """Events on `days`, plus (with unnotified=True) any not yet summarized."""
+    def events(self, days: List[dt.date] = (), added_after: Optional[str] = None) -> List[Event]:
+        """Events on `days`, plus (with added_after, a utc_now() value) any the
+        bot first saw after that moment, e.g. notes entered late for an earlier day."""
         marks = ",".join("?" * len(days))
         where = [f"date IN ({marks})"] if days else []
-        if unnotified:
-            where.append("notified = 0")
+        params: List[str] = [d.isoformat() for d in days]
+        if added_after:
+            where.append("added_at > ?")
+            params.append(added_after)
         rows = self._db.execute(
             "SELECT id, kid_id, date, type, positive, subject, teacher, hour, remark FROM events "
             f"WHERE {' OR '.join(where) or '0'} ORDER BY date, hour, id",
-            tuple(d.isoformat() for d in days),
+            params,
         )
         return [Event(r[0], r[1], dt.date.fromisoformat(r[2]), r[3], bool(r[4]), *r[5:]) for r in rows]
-
-    def mark_events_notified(self, event_ids: List[int]) -> None:
-        self._db.executemany("UPDATE events SET notified = 1 WHERE id = ?", [(i,) for i in event_ids])
-        self._db.commit()
 
     # lessons (local copy of Webtop)
 
@@ -436,8 +448,31 @@ class Store:
 
     def remove_user(self, user_id: int) -> bool:
         cur = self._db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        self._db.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
         self._db.commit()
         return cur.rowcount == 1
+
+    def admin_user_ids(self) -> set[int]:
+        """Users made admins from /config (TELEGRAM_ADMIN_IDS come on top)."""
+        return {r[0] for r in self._db.execute("SELECT id FROM users WHERE is_admin = 1")}
+
+    def set_admin(self, user_id: int, admin: bool) -> None:
+        self._db.execute("UPDATE users SET is_admin = ? WHERE id = ?", (int(admin), user_id))
+        self._db.commit()
+
+    def user_setting(self, user_id: int, key: str) -> Optional[str]:
+        row = self._db.execute(
+            "SELECT value FROM user_settings WHERE user_id = ? AND key = ?", (user_id, key)
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_user_setting(self, user_id: int, key: str, value: str) -> None:
+        self._db.execute(
+            "INSERT INTO user_settings (user_id, key, value) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value",
+            (user_id, key, value),
+        )
+        self._db.commit()
 
     # To Do lists
 
