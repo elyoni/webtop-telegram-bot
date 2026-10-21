@@ -14,6 +14,7 @@ DIGEST_OPTIONS = ("13:00", "14:00", "15:00", "16:00", "17:00", "18:00")
 REMINDER_OPTIONS = ("19:00", "19:30", "20:00", "20:30", "21:00")
 SYNC_OPTIONS = ("06:00", "07:00", "10:00", "13:00", "14:00", "15:30", "17:00", "19:00")
 OFF = "off"
+MAX_PENDING = 10  # access requests kept; anyone can /start the bot, so this is bounded
 
 
 def fmt(t: Optional[dt.time]) -> str:
@@ -54,9 +55,9 @@ class Settings:
         return self._time("reminder_time", self.cfg.reminder_time)
 
     def set_time(self, name: str, value: str) -> None:
-        """name: digest_time / reminder_time; value: HH:MM or 'off'."""
-        if value != OFF:
-            dt.time.fromisoformat(value)  # validate
+        """name: digest_time / reminder_time; value: one of time_options(name) or 'off'."""
+        if value != OFF and value not in self.time_options(name):
+            raise ValueError(f"{name}: unexpected value {value!r}")
         self._set(name, value)
 
     @property
@@ -67,8 +68,10 @@ class Settings:
         return tuple(dt.time.fromisoformat(t) for t in raw.split(",") if t)
 
     def toggle_sync_time(self, value: str) -> None:
+        if value not in self.time_options("sync_times"):
+            raise ValueError(f"sync_times: unexpected value {value!r}")
         times = {f"{t:%H:%M}" for t in self.sync_times}
-        times ^= {f"{dt.time.fromisoformat(value):%H:%M}"}
+        times ^= {value}
         self._set("sync_times", ",".join(sorted(times)))
 
     def time_options(self, name: str) -> List[str]:
@@ -85,8 +88,8 @@ class Settings:
     def set_pending(self, user_id: int, name: Optional[str]) -> None:
         """Add a request, or remove it with name=None."""
         pending = self.pending_users()
-        if name is None:
-            pending.pop(user_id, None)
-        else:
-            pending[user_id] = name
+        pending.pop(user_id, None)
+        if name is not None:
+            pending[user_id] = name  # newest last
+            pending = dict(list(pending.items())[-MAX_PENDING:])
         self._set("pending_users", json.dumps(pending, ensure_ascii=False))

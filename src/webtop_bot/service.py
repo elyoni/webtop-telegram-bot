@@ -13,6 +13,7 @@ from .store import Store, Task
 logger = logging.getLogger(__name__)
 
 KidLessons = List[Tuple[Kid, List[Lesson]]]
+DATA_VERSION = 2  # 2: homework tasks keyed by lesson slot; older data needs a sync to adopt them
 REOPEN_CHECK_DAYS = 14  # done tasks due this recently are checked for being reopened in the app
 
 
@@ -77,6 +78,10 @@ class Service:
         start, end = dt.date.fromisoformat(first), dt.date.fromisoformat(last)
         return [start + dt.timedelta(days=i) for i in range((end - start).days + 1)]
 
+    def needs_resync(self) -> bool:
+        """The db was last synced by an older version (e.g. tasks still keyed by text)."""
+        return self.store.get_meta("data_version") != str(DATA_VERSION)
+
     def last_sync(self) -> Optional[dt.datetime]:
         raw = self.store.get_meta("last_success")
         return dt.datetime.fromisoformat(raw).astimezone(self.cfg.tz) if raw else None
@@ -132,6 +137,8 @@ class Service:
             self.store.set_meta("range_from", days[0].isoformat())
             self.store.set_meta("range_to", days[-1].isoformat())
             self.store.set_meta("last_success", self.cfg.now().isoformat())
+            self.store.set_meta("data_version", str(DATA_VERSION))
+            self.store.set_meta("sync_alerted", "")  # a failure after this alerts the admins again
         await self.push_to_todo()
         await self.pull_from_todo()  # imported tasks are unnotified, so returned below
         today = self.cfg.today()
@@ -144,7 +151,9 @@ class Service:
             for task in self.store.tasks_without_todo():
                 try:
                     list_id = await self._list_for(task.kid_id, task.kid_name)
-                    todo_id = await self.todo.create_task(list_id, task.title, _body(task), task.due_date, self.cfg.tz.key)
+                    todo_id = await self.todo.create_task(
+                        list_id, task.title, _body(task), task.due_date, self.cfg.tz.key
+                    )
                     self.store.set_todo_ids(task.id, list_id, todo_id)
                 except Exception as e:
                     logger.warning("Task app push failed for task %s: %s", task.id, e)

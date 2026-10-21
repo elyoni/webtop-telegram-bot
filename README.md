@@ -79,6 +79,7 @@ uv sync
 set -a; . ./.env; set +a     # or direnv (`.envrc` = `dotenv`)
 uv run webtop-bot login-microsoft   # once, if using To Do
 uv run webtop-bot run
+uv run --with pytest pytest -q    # unit tests (no network)
 ```
 
 ### Docker: Microsoft To Do login

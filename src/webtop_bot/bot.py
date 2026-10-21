@@ -7,9 +7,11 @@ import html
 import logging
 from typing import Awaitable, Callable, List, Optional, Sequence, Tuple
 
+from telegram import Bot as TelegramBot
 from telegram import (
     BotCommand,
     BotCommandScopeChat,
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
@@ -24,6 +26,7 @@ from telegram.ext import (
     ContextTypes,
     Defaults,
     MessageHandler,
+    JobQueue,
     filters,
 )
 
@@ -163,11 +166,11 @@ class Bot:
         app.add_error_handler(self.on_error)
 
         self.schedule_jobs(app.job_queue)
-        if not self.service.last_sync():
-            app.job_queue.run_once(self.job_sync, when=5)  # first start: fill the db
+        if not self.service.last_sync() or self.service.needs_resync():
+            app.job_queue.run_once(self.job_sync, when=5)  # first start, or data from an older version
         return app
 
-    def schedule_jobs(self, jq) -> None:
+    def schedule_jobs(self, jq: JobQueue) -> None:
         """(Re)create the scheduled jobs from the current settings."""
         for name in ("digest", "reminder", "sync", "todo_poll"):
             for job in jq.get_jobs_by_name(name):
@@ -176,7 +179,9 @@ class Bot:
         if st.digest_time:
             jq.run_daily(self.job_digest, st.digest_time.replace(tzinfo=tz), days=SCHOOL_DAYS, name="digest")
         if st.reminder_time:
-            jq.run_daily(self.job_reminder, st.reminder_time.replace(tzinfo=tz), days=EVENINGS_BEFORE_SCHOOL, name="reminder")
+            jq.run_daily(
+                self.job_reminder, st.reminder_time.replace(tzinfo=tz), days=EVENINGS_BEFORE_SCHOOL, name="reminder"
+            )
         for at in st.sync_times:
             jq.run_daily(self.job_sync, at.replace(tzinfo=tz), name="sync")
         if self.service.todo and st.todo_poll_minutes:
@@ -189,7 +194,7 @@ class Bot:
         await self.service.delete_orphans()
         await self.service.push_to_todo()  # e.g. after switching the task app
 
-    async def _set_commands(self, bot, chat_id: int) -> None:
+    async def _set_commands(self, bot: TelegramBot, chat_id: int) -> None:
         try:
             commands = ADMIN_COMMANDS if self.is_admin(chat_id) else COMMANDS
             await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id))
@@ -524,9 +529,10 @@ class Bot:
             return rows + [back]
 
         if screen == "main":
+            pending = len(st.pending_users())
             rows = [
-                [btn(f"👥 משתמשים ({len(self.store.users())})"
-                     + (f" · {len(st.pending_users())} ממתינים" if st.pending_users() else ""), callback_data="cfg:users")],
+                [btn(f"👥 משתמשים ({len(self.store.users())})" + (f" · {pending} ממתינים" if pending else ""),
+                     callback_data="cfg:users")],
                 [btn(f"📚 סיכום יומי: {fmt(st.digest_time)}", callback_data="cfg:digest_time")],
                 [btn(f"⏰ תזכורת ערב: {fmt(st.reminder_time)}", callback_data="cfg:reminder_time")],
                 [btn("🌐 עדכון מ-Webtop: " + (", ".join(f"{t:%H:%M}" for t in st.sync_times) or "כבוי"),
@@ -545,7 +551,8 @@ class Bot:
                              btn("✖ דחייה", callback_data=f"cfg:deny={uid}")])
             text = ("👥 <b>משתמשים</b>\n🚫 לחיצה על משתמש מסירה אותו (עם אישור)\n"
                     "✅ / ✖ בקשות גישה ממתינות\n\n"
-                    "מנהלים (מ-TELEGRAM_ADMIN_IDS): " + ", ".join(f"<code>{i}</code>" for i in sorted(self.cfg.admin_ids)))
+                    "מנהלים (מ-TELEGRAM_ADMIN_IDS): "
+                    + ", ".join(f"<code>{i}</code>" for i in sorted(self.cfg.admin_ids)))
             return text, InlineKeyboardMarkup(rows + [back])
         if screen.startswith("revoke?="):
             uid = screen.partition("=")[2]
@@ -553,12 +560,11 @@ class Bot:
             return f"להסיר את {e(name)}?", InlineKeyboardMarkup([
                 [btn("🚫 כן, להסיר", callback_data=f"cfg:revoke={uid}"), btn("ביטול", callback_data="cfg:users")]
             ])
-        if screen == "digest_time":
-            return ("📚 <b>שעת הסיכום היומי</b> (א׳–ו׳)",
-                    InlineKeyboardMarkup(times("digest_time", {fmt(st.digest_time)} if st.digest_time else set(), True)))
-        if screen == "reminder_time":
-            return ("⏰ <b>שעת תזכורת הערב</b> (משימות פתוחות למחר)",
-                    InlineKeyboardMarkup(times("reminder_time", {fmt(st.reminder_time)} if st.reminder_time else set(), True)))
+        if screen in ("digest_time", "reminder_time"):
+            title = {"digest_time": "📚 <b>שעת הסיכום היומי</b> (א׳–ו׳)",
+                     "reminder_time": "⏰ <b>שעת תזכורת הערב</b> (משימות פתוחות למחר)"}[screen]
+            current: Optional[dt.time] = getattr(st, screen)
+            return title, InlineKeyboardMarkup(times(screen, {fmt(current)} if current else set(), True))
         if screen == "sync_times":
             return ("🌐 <b>מתי לעדכן מ-Webtop</b> (לחיצה מוסיפה / מסירה)",
                     InlineKeyboardMarkup(times("sync_times", {f"{t:%H:%M}" for t in st.sync_times}, False)))
@@ -569,36 +575,44 @@ class Bot:
             return "🔄 <b>כל כמה זמן לבדוק את Todoist</b>", InlineKeyboardMarkup(rows + [back])
         return self._config_screen("main")
 
-    async def _config_action(self, query, context: ContextTypes.DEFAULT_TYPE, op: str) -> None:
+    async def _config_action(self, query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, op: str) -> None:
         """Handle a /config button: show a screen, or change a setting and redraw."""
         name, _, value = op.partition("=")
-        st, screen, note = self.settings, name, None
+        st, screen, note, reschedule = self.settings, name, None, False
         if name == "close":
             await query.answer()
             await query.edit_message_text("⚙️ ההגדרות נשמרו")
             return
-        if value and name in ("digest_time", "reminder_time"):
-            st.set_time(name, value)
-            screen, note = "main", "נשמר"
-        elif value and name == "sync_times":
-            st.toggle_sync_time(value)
-            note = "נשמר"
-        elif value and name == "todo_poll":
-            st.set_todo_poll_minutes(int(value))
-            screen, note = "main", "נשמר"
-        elif name == "approve":
-            uid = int(value)
-            await self._allow(context.bot, uid, st.pending_users().get(uid, ""), query.from_user.id)
-            screen, note = "users", "✅ אושר"
-        elif name == "deny":
-            st.set_pending(int(value), None)
-            screen, note = "users", "✖ נדחה"
-        elif name == "revoke":
-            await self._revoke(context.bot, int(value))
-            screen, note = "users", "🚫 הוסר"
-        elif name == "revoke?":
-            screen = op
-        if note:
+        try:  # callback data comes from the client: validate before use
+            if value and name in ("digest_time", "reminder_time"):
+                st.set_time(name, value)
+                screen, note, reschedule = "main", "נשמר", True
+            elif value and name == "sync_times":
+                st.toggle_sync_time(value)
+                note, reschedule = "נשמר", True
+            elif value and name == "todo_poll":
+                minutes = int(value)
+                if minutes not in POLL_OPTIONS:
+                    raise ValueError(value)
+                st.set_todo_poll_minutes(minutes)
+                screen, note, reschedule = "main", "נשמר", True
+            elif name == "approve":
+                uid = int(value)
+                await self._allow(context.bot, uid, st.pending_users().get(uid, ""), query.from_user.id)
+                screen, note = "users", "✅ אושר"
+            elif name == "deny":
+                st.set_pending(int(value), None)
+                screen, note = "users", "✖ נדחה"
+            elif name == "revoke":
+                removed = await self._revoke(context.bot, int(value))
+                screen, note = "users", "🚫 הוסר" if removed else "מנהלים מוגדרים ב-.env"
+            elif name == "revoke?":
+                screen = f"revoke?={int(value)}"
+        except ValueError:
+            logger.warning("Bad /config callback %r from %s", op, query.from_user.id)
+            await query.answer("פעולה לא תקינה")
+            return
+        if reschedule:
             self.schedule_jobs(context.job_queue)
         await query.answer(note)
         text, markup = self._config_screen(screen)
@@ -607,7 +621,7 @@ class Bot:
         except BadRequest as ex:  # "message is not modified"
             logger.debug("Config redraw skipped: %s", ex)
 
-    async def _allow(self, bot, user_id: int, name: str, by: int) -> None:
+    async def _allow(self, bot: TelegramBot, user_id: int, name: str, by: int) -> None:
         self.store.add_user(user_id, name, by)
         self.settings.set_pending(user_id, None)
         await self._set_commands(bot, user_id)
@@ -616,13 +630,15 @@ class Bot:
         except Exception as ex:  # the user never opened a chat with the bot
             logger.warning("Could not notify new user %s: %s", user_id, ex)
 
-    async def _revoke(self, bot, user_id: int) -> None:
+    async def _revoke(self, bot: TelegramBot, user_id: int) -> bool:
+        """Remove a user; False if they are an admin (set in .env) or not in the list."""
         if self.is_admin(user_id) or not self.store.remove_user(user_id):
-            return
+            return False
         try:
             await bot.delete_my_commands(scope=BotCommandScopeChat(user_id))
         except Exception as ex:
             logger.warning("Could not clear commands for chat %s: %s", user_id, ex)
+        return True
 
     # --- buttons --------------------------------------------------------
 
@@ -643,7 +659,7 @@ class Bot:
             return
         await query.answer("הכפתור הזה כבר לא פעיל — /today")
 
-    async def _toggle_kid(self, query, kid_id: str) -> None:
+    async def _toggle_kid(self, query: CallbackQuery, kid_id: str) -> None:
         """Show / hide a kid for the user who pressed, and redraw the /kids toggles."""
         user_id = query.from_user.id
         kids = self.store.kids()
@@ -656,7 +672,7 @@ class Bot:
         await query.answer(f"{'⬜ הוסתר' if hide else '✅ מוצג'}: {kid.first_name}")
         await query.edit_message_reply_markup(kids_keyboard(kids, self.store.hidden_kids(user_id)))
 
-    async def _toggle_done(self, query, task_id: int, done: bool) -> None:
+    async def _toggle_done(self, query: CallbackQuery, task_id: int, done: bool) -> None:
         """Mark done / undo, swapping the pressed button between ✅ and ↩️."""
         task = await self.service.complete(task_id, completed=done)
         if not task:
@@ -704,7 +720,6 @@ class Bot:
             logger.warning("Sync failed: %s", ex)
             await self._alert_sync_failure(context, ex)
             return
-        self.store.set_meta("sync_alerted", "")
         if new:
             await self._announce(context, new)
 

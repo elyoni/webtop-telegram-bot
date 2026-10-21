@@ -105,7 +105,7 @@ class WebtopDataError(Exception):
 def _checked(resp: Any, what: str) -> Any:
     """resp["data"], or raise if Webtop reported a failure."""
     if not isinstance(resp, dict) or not resp.get("status"):
-        detail = resp.get("errorDescription") or resp.get("message") if isinstance(resp, dict) else None
+        detail = (resp.get("errorDescription") or resp.get("message")) if isinstance(resp, dict) else None
         raise WebtopDataError(f"{what}: Webtop returned an error ({detail or 'no status'})")
     return resp.get("data")
 
@@ -144,7 +144,8 @@ async def fetch_lessons(
                 encrypted_student_id=kid.webtop_id,
                 class_code=kid.class_code,
             )
-            if not isinstance(_checked(week, f"lessons of {kid.first_name}"), list):
+            data = _checked(week, f"lessons of {kid.first_name}")
+            if data is not None and not isinstance(data, list):  # None: e.g. a vacation week
                 raise WebtopDataError(f"lessons of {kid.first_name}: unexpected format")
             weeks[sunday] = week
         lessons.extend(_parse_day(weeks[sunday], kid, day))
