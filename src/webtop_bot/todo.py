@@ -123,6 +123,10 @@ class TodoClient:
     async def delete_task(self, list_id: str, task_id: str) -> None:
         await self._request("DELETE", f"/me/todo/lists/{list_id}/tasks/{task_id}")
 
+    async def update_task(self, list_id: str, task_id: str, title: str, body: str) -> None:
+        payload = {"title": title[:255], "body": {"content": body, "contentType": "text"}}
+        await self._request("PATCH", f"/me/todo/lists/{list_id}/tasks/{task_id}", json=payload)
+
     async def set_completed(self, list_id: str, task_id: str, completed: bool = True) -> None:
         status = "completed" if completed else "notStarted"
         await self._request("PATCH", f"/me/todo/lists/{list_id}/tasks/{task_id}", json={"status": status})

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
-from typing import List, Optional, Protocol, Tuple
+from typing import Dict, List, Optional, Protocol, Tuple
 
 from .config import Config
 from .homework import Kid, Lesson, fetch_all, is_school_day, next_school_day, week_start
@@ -23,6 +23,10 @@ def homework_text(lesson: Lesson) -> str:
     return f"📎 {lesson.files} קבצים מצורפים" if lesson.files else ""
 
 
+def _body(task: Task) -> str:
+    return f"{task.kid_name} · {task.subject} · שיעור {task.lesson_date:%d/%m}\n{task.text}"
+
+
 class TaskBackend(Protocol):
     """A task app; implemented by todo.TodoClient and todoist.TodoistClient."""
 
@@ -37,6 +41,7 @@ class TaskBackend(Protocol):
     async def task_status(self, list_id: str, task_id: str) -> Optional[str]: ...
     async def delete_task(self, list_id: str, task_id: str) -> None: ...
     async def set_completed(self, list_id: str, task_id: str, completed: bool = True) -> None: ...
+    async def update_task(self, list_id: str, task_id: str, title: str, body: str) -> None: ...
 
 
 class SyncBusy(Exception):
@@ -111,13 +116,19 @@ class Service:
                 if events is not None:
                     self.store.add_events(kid.id, events)
                 self.store.replace_lessons(kid, days, lessons)
+                # One task per group per day; a double lesson's texts are joined.
+                slots: Dict[Tuple[dt.date, str], Tuple[str, List[str]]] = {}
                 for lesson in lessons:
                     text = homework_text(lesson)
                     if text:
-                        self.store.add_task(
-                            kid.id, lesson.date, next_school_day(lesson.date), lesson.subject, text,
-                            source="homework", notified=first_run,  # don't flood alerts on first run
-                        )
+                        texts = slots.setdefault((lesson.date, lesson.slot), (lesson.subject, []))[1]
+                        if text not in texts:
+                            texts.append(text)
+                for (date, slot), (subject, texts) in slots.items():
+                    self.store.upsert_homework(
+                        kid.id, date, next_school_day(date), slot, subject, " · ".join(texts),
+                        notified=first_run,  # don't flood alerts on first run
+                    )
             self.store.set_meta("range_from", days[0].isoformat())
             self.store.set_meta("range_to", days[-1].isoformat())
             self.store.set_meta("last_success", self.cfg.now().isoformat())
@@ -133,12 +144,18 @@ class Service:
             for task in self.store.tasks_without_todo():
                 try:
                     list_id = await self._list_for(task.kid_id, task.kid_name)
-                    body = f"{task.kid_name} · {task.subject} · שיעור {task.lesson_date:%d/%m}\n{task.text}"
-                    todo_id = await self.todo.create_task(list_id, task.title, body, task.due_date, self.cfg.tz.key)
+                    todo_id = await self.todo.create_task(list_id, task.title, _body(task), task.due_date, self.cfg.tz.key)
                     self.store.set_todo_ids(task.id, list_id, todo_id)
                 except Exception as e:
                     logger.warning("Task app push failed for task %s: %s", task.id, e)
                     return  # e.g. not logged in; retry next sync
+            for task in self.store.stale_tasks():  # teacher edited the homework
+                try:
+                    await self.todo.update_task(task.todo_list_id, task.todo_task_id, task.title, _body(task))
+                    self.store.clear_stale(task.id)
+                except Exception as e:
+                    logger.warning("Task app update failed for task %s: %s", task.id, e)
+                    return
 
     async def delete_orphans(self) -> None:
         """Delete task-app copies of duplicate tasks dropped by the db migration."""

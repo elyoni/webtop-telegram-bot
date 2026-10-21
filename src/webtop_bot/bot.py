@@ -16,6 +16,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -29,6 +30,7 @@ from telegram.ext import (
 from .config import Config
 from .homework import Event, Kid, Lesson, is_school_day, next_school_day, prev_school_day, week_start
 from .service import Service, SyncBusy, SyncCooldown, homework_text
+from .settings import OFF, POLL_OPTIONS, Settings, fmt
 from .store import Task
 
 logger = logging.getLogger(__name__)
@@ -48,11 +50,9 @@ COMMANDS = [
     BotCommand("kids", "בחירת ילדים להצגה"),
     BotCommand("help", "עזרה ומקרא סימנים"),
 ]
-ADMIN_COMMANDS = COMMANDS + [
-    BotCommand("users", "משתמשים מורשים"),
-    BotCommand("allow", "הרשאה: /allow <id> [שם]"),
-    BotCommand("revoke", "הסרת הרשאה: /revoke <id>"),
-]
+ADMIN_COMMANDS = COMMANDS + [BotCommand("config", "הגדרות: משתמשים, זמנים, Todoist")]
+SCHOOL_DAYS = (0, 1, 2, 3, 4, 5)  # PTB: 0 = Sunday
+EVENINGS_BEFORE_SCHOOL = (0, 1, 2, 3, 4, 6)  # Sun-Thu and Saturday
 
 # Persistent keyboard: button text -> command name.
 MENU_BUTTONS = {
@@ -123,7 +123,7 @@ class Bot:
         self.cfg = cfg
         self.service = service
         self.store = service.store
-        self._access_requests: set[int] = set()  # users already reported to the admins
+        self.settings = Settings(cfg, self.store)
 
     def allowed_ids(self) -> set[int]:
         return set(self.cfg.admin_ids) | self.store.user_ids()
@@ -157,24 +157,30 @@ class Bot:
         }
         for name, handler in self.commands.items():
             app.add_handler(CommandHandler(name, self._guard(handler)))
-        for name, handler in {"users": self.cmd_users, "allow": self.cmd_allow, "revoke": self.cmd_revoke}.items():
-            app.add_handler(CommandHandler(name, self._guard(handler, admin=True)))
+        app.add_handler(CommandHandler("config", self._guard(self.cmd_config, admin=True)))
         app.add_handler(MessageHandler(filters.Text(list(MENU_BUTTONS)), self._guard(self.on_menu)))
         app.add_handler(CallbackQueryHandler(self._guard(self.on_button)))
         app.add_error_handler(self.on_error)
 
-        jq = app.job_queue
-        school_days = (0, 1, 2, 3, 4, 5)  # PTB: 0 = Sunday
-        jq.run_daily(self.job_digest, self.cfg.digest_time.replace(tzinfo=self.cfg.tz), days=school_days)
-        # Evening before a school day: Sun-Thu and Saturday.
-        jq.run_daily(self.job_reminder, self.cfg.reminder_time.replace(tzinfo=self.cfg.tz), days=(0, 1, 2, 3, 4, 6))
-        for at in self.cfg.sync_times:
-            jq.run_daily(self.job_sync, at.replace(tzinfo=self.cfg.tz))
-        if self.service.todo and self.cfg.todo_poll_minutes:
-            jq.run_repeating(self.job_todo_poll, interval=self.cfg.todo_poll_minutes * 60, first=60)
+        self.schedule_jobs(app.job_queue)
         if not self.service.last_sync():
-            jq.run_once(self.job_sync, when=5)  # first start: fill the db
+            app.job_queue.run_once(self.job_sync, when=5)  # first start: fill the db
         return app
+
+    def schedule_jobs(self, jq) -> None:
+        """(Re)create the scheduled jobs from the current settings."""
+        for name in ("digest", "reminder", "sync", "todo_poll"):
+            for job in jq.get_jobs_by_name(name):
+                job.schedule_removal()
+        st, tz = self.settings, self.cfg.tz
+        if st.digest_time:
+            jq.run_daily(self.job_digest, st.digest_time.replace(tzinfo=tz), days=SCHOOL_DAYS, name="digest")
+        if st.reminder_time:
+            jq.run_daily(self.job_reminder, st.reminder_time.replace(tzinfo=tz), days=EVENINGS_BEFORE_SCHOOL, name="reminder")
+        for at in st.sync_times:
+            jq.run_daily(self.job_sync, at.replace(tzinfo=tz), name="sync")
+        if self.service.todo and st.todo_poll_minutes:
+            jq.run_repeating(self.job_todo_poll, interval=st.todo_poll_minutes * 60, first=60, name="todo_poll")
 
     async def _post_init(self, app: Application) -> None:
         """Register the command menu for allowed chats only; push pending tasks to the task app."""
@@ -229,8 +235,12 @@ class Bot:
         A private chat's id is its user's id, so each user gets their own kids."""
         for chat_id in self.allowed_ids():
             message = make(self.store.hidden_kids(chat_id))
-            if message:
+            if not message:
+                continue
+            try:  # one blocked / deleted chat mustn't stop the others
                 await self._send_chunks(lambda t, m: context.bot.send_message(chat_id, t, reply_markup=m), *message)
+            except Exception as ex:
+                logger.warning("Could not send to chat %s: %s", chat_id, ex)
 
     async def reply(self, update: Update, text: str, buttons: Buttons = ()) -> None:
         await self._send_chunks(lambda t, m: update.effective_message.reply_text(t, reply_markup=m), text, buttons)
@@ -274,7 +284,7 @@ class Bot:
                     lines.append(f"\n<u>{day_label(day)}</u>" + ("" if todays else ": אין"))
                 for lesson in todays:
                     text = homework_text(lesson)
-                    task = self.store.task_for(kid.id, lesson.date, lesson.subject, text) if text else None
+                    task = self.store.homework_task(kid.id, lesson.date, lesson.slot) if text else None
                     promoted = (
                         self.store.task_for(kid.id, lesson.date, lesson.subject, lesson.topic)
                         if lesson.topic and not task else None
@@ -366,21 +376,25 @@ class Bot:
             "שכחנו משהו? /add"
         )
         if self.is_admin(chat_id):
-            text += "\n\n<b>ניהול</b>\n/users\n/allow &lt;id&gt; [שם]\n/revoke &lt;id&gt;"
+            text += "\n\n<b>ניהול</b>\n/config — משתמשים, זמני הודעות ועדכונים, Todoist"
         await update.effective_message.reply_text(text, reply_markup=MENU)
 
     async def _request_access(self, context: ContextTypes.DEFAULT_TYPE, update: Update) -> None:
         """Tell the admins (once per user per run) that someone asked for access."""
         chat, user = update.effective_chat, update.effective_user
-        if chat.type != chat.PRIVATE or not user or user.id in self._access_requests:
+        if chat.type != chat.PRIVATE or not user or user.id in self.settings.pending_users():
             return
-        self._access_requests.add(user.id)
-        name = " ".join(filter(None, [user.first_name, user.last_name]))
+        name = " ".join(filter(None, [user.first_name, user.last_name])) or str(user.id)
+        self.settings.set_pending(user.id, name)
         handle = f" @{user.username}" if user.username else ""
-        text = f"👤 בקשת גישה: {e(name)}{e(handle)} (<code>{user.id}</code>)\n/allow {user.id} {e(name)}"
+        text = f"👤 בקשת גישה: {e(name)}{e(handle)} (<code>{user.id}</code>)"
+        buttons = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ אישור", callback_data=f"cfg:approve={user.id}"),
+            InlineKeyboardButton("✖ דחייה", callback_data=f"cfg:deny={user.id}"),
+        ]])
         for admin in self.cfg.admin_ids:
             try:
-                await context.bot.send_message(admin, text)
+                await context.bot.send_message(admin, text, reply_markup=buttons)
             except Exception as ex:
                 logger.warning("Could not notify admin %s: %s", admin, ex)
 
@@ -452,7 +466,11 @@ class Bot:
             args = args[:-1]
         except ValueError:
             pass
-        task = await self.service.add_manual(matches[0], " ".join(args[1:]), due)
+        text = " ".join(args[1:]).strip()
+        if not text:
+            await self.reply(update, "Usage: /add &lt;kid&gt; &lt;text&gt; [YYYY-MM-DD]")
+            return
+        task = await self.service.add_manual(matches[0], text, due)
         await self.reply(update, f"➕ נוסף: {e(task.text)} ({e(matches[0].first_name)}, ל-{due:%d/%m})", [done_button(task)])
 
     async def cmd_sync(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -486,45 +504,125 @@ class Bot:
 
     # --- admin ----------------------------------------------------------
 
-    async def cmd_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        lines = ["<b>מנהלים</b>"] + [f"• <code>{i}</code>" for i in sorted(self.cfg.admin_ids)]
-        lines += ["", "<b>משתמשים</b>"]
-        lines += [f"• <code>{i}</code> {e(name)}" for i, name in self.store.users()] or ["אין"]
-        await self.reply(update, "\n".join(lines))
+    # --- /config (admins) ------------------------------------------------
 
-    async def cmd_allow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        try:
-            user_id = int(context.args[0])
-        except (IndexError, ValueError):
-            await self.reply(update, "Usage: /allow &lt;id&gt; [name]")
+    async def cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        text, markup = self._config_screen("main")
+        await update.effective_message.reply_text(text, reply_markup=markup)
+
+    def _config_screen(self, screen: str) -> Tuple[str, InlineKeyboardMarkup]:
+        st = self.settings
+        btn = InlineKeyboardButton
+        back = [btn("⬅️ חזרה", callback_data="cfg:main")]
+
+        def times(name: str, current: set[str], allow_off: bool) -> List[List[InlineKeyboardButton]]:
+            options = [btn(("✅ " if t in current else "") + t, callback_data=f"cfg:{name}={t}")
+                       for t in st.time_options(name)]
+            rows = [options[i : i + 3] for i in range(0, len(options), 3)]
+            if allow_off:
+                rows.append([btn(("✅ " if not current else "") + "כבוי", callback_data=f"cfg:{name}={OFF}")])
+            return rows + [back]
+
+        if screen == "main":
+            rows = [
+                [btn(f"👥 משתמשים ({len(self.store.users())})"
+                     + (f" · {len(st.pending_users())} ממתינים" if st.pending_users() else ""), callback_data="cfg:users")],
+                [btn(f"📚 סיכום יומי: {fmt(st.digest_time)}", callback_data="cfg:digest_time")],
+                [btn(f"⏰ תזכורת ערב: {fmt(st.reminder_time)}", callback_data="cfg:reminder_time")],
+                [btn("🌐 עדכון מ-Webtop: " + (", ".join(f"{t:%H:%M}" for t in st.sync_times) or "כבוי"),
+                     callback_data="cfg:sync_times")],
+            ]
+            if self.service.todo:
+                poll = st.todo_poll_minutes
+                rows.append([btn(f"🔄 סנכרון Todoist: {f'כל {poll} דק׳' if poll else 'רק עם עדכון Webtop'}",
+                                 callback_data="cfg:todo_poll")])
+            rows.append([btn("✖ סגירה", callback_data="cfg:close")])
+            return "⚙️ <b>הגדרות</b>", InlineKeyboardMarkup(rows)
+        if screen == "users":
+            rows = [[btn(f"🚫 {name or uid}", callback_data=f"cfg:revoke?={uid}")] for uid, name in self.store.users()]
+            for uid, name in st.pending_users().items():
+                rows.append([btn(f"✅ {name}", callback_data=f"cfg:approve={uid}"),
+                             btn("✖ דחייה", callback_data=f"cfg:deny={uid}")])
+            text = ("👥 <b>משתמשים</b>\n🚫 לחיצה על משתמש מסירה אותו (עם אישור)\n"
+                    "✅ / ✖ בקשות גישה ממתינות\n\n"
+                    "מנהלים (מ-TELEGRAM_ADMIN_IDS): " + ", ".join(f"<code>{i}</code>" for i in sorted(self.cfg.admin_ids)))
+            return text, InlineKeyboardMarkup(rows + [back])
+        if screen.startswith("revoke?="):
+            uid = screen.partition("=")[2]
+            name = dict(self.store.users()).get(int(uid)) or uid
+            return f"להסיר את {e(name)}?", InlineKeyboardMarkup([
+                [btn("🚫 כן, להסיר", callback_data=f"cfg:revoke={uid}"), btn("ביטול", callback_data="cfg:users")]
+            ])
+        if screen == "digest_time":
+            return ("📚 <b>שעת הסיכום היומי</b> (א׳–ו׳)",
+                    InlineKeyboardMarkup(times("digest_time", {fmt(st.digest_time)} if st.digest_time else set(), True)))
+        if screen == "reminder_time":
+            return ("⏰ <b>שעת תזכורת הערב</b> (משימות פתוחות למחר)",
+                    InlineKeyboardMarkup(times("reminder_time", {fmt(st.reminder_time)} if st.reminder_time else set(), True)))
+        if screen == "sync_times":
+            return ("🌐 <b>מתי לעדכן מ-Webtop</b> (לחיצה מוסיפה / מסירה)",
+                    InlineKeyboardMarkup(times("sync_times", {f"{t:%H:%M}" for t in st.sync_times}, False)))
+        if screen == "todo_poll":
+            rows = [[btn(("✅ " if m == st.todo_poll_minutes else "") + (f"{m} דק׳" if m else "רק עם Webtop"),
+                         callback_data=f"cfg:todo_poll={m}") for m in POLL_OPTIONS[i : i + 3]]
+                    for i in range(0, len(POLL_OPTIONS), 3)]
+            return "🔄 <b>כל כמה זמן לבדוק את Todoist</b>", InlineKeyboardMarkup(rows + [back])
+        return self._config_screen("main")
+
+    async def _config_action(self, query, context: ContextTypes.DEFAULT_TYPE, op: str) -> None:
+        """Handle a /config button: show a screen, or change a setting and redraw."""
+        name, _, value = op.partition("=")
+        st, screen, note = self.settings, name, None
+        if name == "close":
+            await query.answer()
+            await query.edit_message_text("⚙️ ההגדרות נשמרו")
             return
-        name = " ".join(context.args[1:])
-        self.store.add_user(user_id, name, update.effective_user.id)
-        self._access_requests.discard(user_id)
-        await self._set_commands(context.bot, user_id)
-        await self.reply(update, f"✅ <code>{user_id}</code> {e(name)} מורשה")
+        if value and name in ("digest_time", "reminder_time"):
+            st.set_time(name, value)
+            screen, note = "main", "נשמר"
+        elif value and name == "sync_times":
+            st.toggle_sync_time(value)
+            note = "נשמר"
+        elif value and name == "todo_poll":
+            st.set_todo_poll_minutes(int(value))
+            screen, note = "main", "נשמר"
+        elif name == "approve":
+            uid = int(value)
+            await self._allow(context.bot, uid, st.pending_users().get(uid, ""), query.from_user.id)
+            screen, note = "users", "✅ אושר"
+        elif name == "deny":
+            st.set_pending(int(value), None)
+            screen, note = "users", "✖ נדחה"
+        elif name == "revoke":
+            await self._revoke(context.bot, int(value))
+            screen, note = "users", "🚫 הוסר"
+        elif name == "revoke?":
+            screen = op
+        if note:
+            self.schedule_jobs(context.job_queue)
+        await query.answer(note)
+        text, markup = self._config_screen(screen)
         try:
-            await context.bot.send_message(user_id, "✅ קיבלת גישה לבוט. שלחו /start", reply_markup=MENU)
+            await query.edit_message_text(text, reply_markup=markup)
+        except BadRequest as ex:  # "message is not modified"
+            logger.debug("Config redraw skipped: %s", ex)
+
+    async def _allow(self, bot, user_id: int, name: str, by: int) -> None:
+        self.store.add_user(user_id, name, by)
+        self.settings.set_pending(user_id, None)
+        await self._set_commands(bot, user_id)
+        try:
+            await bot.send_message(user_id, "✅ קיבלת גישה לבוט. שלחו /start", reply_markup=MENU)
         except Exception as ex:  # the user never opened a chat with the bot
             logger.warning("Could not notify new user %s: %s", user_id, ex)
 
-    async def cmd_revoke(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        try:
-            user_id = int(context.args[0])
-        except (IndexError, ValueError):
-            await self.reply(update, "Usage: /revoke &lt;id&gt;")
-            return
-        if self.is_admin(user_id):
-            await self.reply(update, "Admins are set in TELEGRAM_ADMIN_IDS, not in the db.")
-            return
-        if not self.store.remove_user(user_id):
-            await self.reply(update, f"<code>{user_id}</code> לא ברשימה")
+    async def _revoke(self, bot, user_id: int) -> None:
+        if self.is_admin(user_id) or not self.store.remove_user(user_id):
             return
         try:
-            await context.bot.delete_my_commands(scope=BotCommandScopeChat(user_id))
+            await bot.delete_my_commands(scope=BotCommandScopeChat(user_id))
         except Exception as ex:
             logger.warning("Could not clear commands for chat %s: %s", user_id, ex)
-        await self.reply(update, f"🚫 <code>{user_id}</code> הוסר")
 
     # --- buttons --------------------------------------------------------
 
@@ -536,6 +634,12 @@ class Bot:
             return
         if action == "kid":
             await self._toggle_kid(query, raw_id)
+            return
+        if action == "cfg":
+            if not self.is_admin(query.from_user.id):
+                await query.answer("למנהלים בלבד")
+                return
+            await self._config_action(query, context, raw_id)
             return
         await query.answer("הכפתור הזה כבר לא פעיל — /today")
 
@@ -598,9 +702,23 @@ class Bot:
             return
         except Exception as ex:
             logger.warning("Sync failed: %s", ex)
+            await self._alert_sync_failure(context, ex)
             return
+        self.store.set_meta("sync_alerted", "")
         if new:
             await self._announce(context, new)
+
+    async def _alert_sync_failure(self, context: ContextTypes.DEFAULT_TYPE, ex: Exception) -> None:
+        """Tell the admins, once until a sync succeeds again."""
+        if self.store.get_meta("sync_alerted"):
+            return
+        self.store.set_meta("sync_alerted", "1")
+        text = f"⚠️ העדכון מ-Webtop נכשל: {e(str(ex))[:300]}\n{self.freshness()}"
+        for admin in self.cfg.admin_ids:
+            try:
+                await context.bot.send_message(admin, text)
+            except Exception as err:
+                logger.warning("Could not alert admin %s: %s", admin, err)
 
     async def job_digest(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         today = self.cfg.today()
@@ -608,8 +726,10 @@ class Bot:
         events = self.store.events([today], unnotified=True)  # also notes entered late
 
         def make(hidden: set[str]) -> Optional[Message]:
-            if all(kid.id in hidden for kid, _ in view):
-                return None
+            visible = [lessons for kid, lessons in view if kid.id not in hidden]
+            visible_ids = {kid.id for kid, _ in view if kid.id not in hidden}
+            if not any(visible) and not any(ev.kid_id in visible_ids for ev in events):
+                return None  # no school today (holiday, or nothing synced)
             text, buttons, shown = self.render(view, [today], hidden=hidden, events=events)
             self.store.mark_notified(shown)
             return f"📚 <b>סיכום {day_label(today)}</b>\n\n{text}\n\n{self.freshness()}", buttons

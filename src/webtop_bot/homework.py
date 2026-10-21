@@ -44,6 +44,13 @@ class Lesson:
     topic: str
     homework: str
     files: int
+    group: int = 0  # Webtop's study_group: the teacher's group in this subject
+
+    @property
+    def slot(self) -> str:
+        """Identifies the kid's lessons of one group (or subject) on a day; homework
+        tasks are keyed by it, so a teacher editing the text updates the task."""
+        return f"group:{self.group}" if self.group else f"subject:{self.subject}"
 
 
 @dataclass(frozen=True)
@@ -91,10 +98,23 @@ def make_client(cfg: Config) -> WebtopClient:
     return WebtopClient(cfg.webtop_username, cfg.webtop_password, **kwargs)
 
 
+class WebtopDataError(Exception):
+    """Webtop answered, but not with usable data (so don't overwrite what we have)."""
+
+
+def _checked(resp: Any, what: str) -> Any:
+    """resp["data"], or raise if Webtop reported a failure."""
+    if not isinstance(resp, dict) or not resp.get("status"):
+        detail = resp.get("errorDescription") or resp.get("message") if isinstance(resp, dict) else None
+        raise WebtopDataError(f"{what}: Webtop returned an error ({detail or 'no status'})")
+    return resp.get("data")
+
+
 async def fetch_kids(client: WebtopClient) -> List[Kid]:
-    dashboard = await client.get_students()
-    data = dashboard.get("data") if isinstance(dashboard, dict) else None
+    data = _checked(await client.get_students(), "dashboard")
     children = data.get("childrens") if isinstance(data, dict) else None
+    if not children:
+        raise WebtopDataError("dashboard: no kids found")
     return [
         Kid(
             id=kid_id(name),
@@ -118,12 +138,15 @@ async def fetch_lessons(
     for day in sorted(set(days)):
         sunday = week_start(day)
         if sunday not in weeks:
-            weeks[sunday] = await client.get_lessons_and_homework(
+            week = await client.get_lessons_and_homework(
                 week_index=(sunday - week_start(today)).days // 7,
                 study_year=study_year(day),
                 encrypted_student_id=kid.webtop_id,
                 class_code=kid.class_code,
             )
+            if not isinstance(_checked(week, f"lessons of {kid.first_name}"), list):
+                raise WebtopDataError(f"lessons of {kid.first_name}: unexpected format")
+            weeks[sunday] = week
         lessons.extend(_parse_day(weeks[sunday], kid, day))
     return lessons
 
@@ -143,6 +166,7 @@ def _parse_day(week: Any, kid: Kid, day: dt.date) -> List[Lesson]:
                 topic=(item.get("descClass") or "").strip(),
                 homework=(item.get("homeWork") or "").strip(),
                 files=len(item.get("files") or []),
+                group=item.get("study_group") or 0,
             )
             for hour in entry.get("hoursData") or []
             for item in hour.get("scheduale") or []

@@ -90,6 +90,10 @@ def item_key(kid_id: str, date: dt.date, subject: str, text: str) -> str:
     return hashlib.sha1(f"{kid_id}|{date}|{subject}|{text}".encode()).hexdigest()
 
 
+def slot_key(kid_id: str, date: dt.date, slot: str) -> str:
+    return hashlib.sha1(f"{kid_id}|{date}|{slot}|homework".encode()).hexdigest()
+
+
 @dataclass
 class Task:
     id: int
@@ -139,6 +143,13 @@ class Store:
         self._db.commit()
         self.orphaned_todo: List[tuple[str, str]] = []  # (list id, task id) to delete in the task app
         self._migrate_kid_ids()
+        self._add_column("lessons", "study_group", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column("tasks", "todo_stale", "INTEGER NOT NULL DEFAULT 0")  # text changed since pushed
+
+    def _add_column(self, table: str, column: str, definition: str) -> None:
+        if column not in {r[1] for r in self._db.execute(f"PRAGMA table_info({table})")}:
+            self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            self._db.commit()
 
     def _migrate_kid_ids(self) -> None:
         """Older versions keyed kids by Webtop's id, which changes on every login,
@@ -254,10 +265,10 @@ class Store:
                 "DELETE FROM lessons WHERE kid_id = ? AND date = ?", [(kid.id, d.isoformat()) for d in days]
             )
             self._db.executemany(
-                "INSERT INTO lessons (kid_id, date, hour, subject, teacher, topic, homework, files) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO lessons (kid_id, date, hour, subject, teacher, topic, homework, files, study_group) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (kid.id, l.date.isoformat(), l.hour, l.subject, l.teacher, l.topic, l.homework, l.files)
+                    (kid.id, l.date.isoformat(), l.hour, l.subject, l.teacher, l.topic, l.homework, l.files, l.group)
                     for l in lessons
                 ],
             )
@@ -265,7 +276,7 @@ class Store:
     def lessons(self, kid: Kid, days: List[dt.date]) -> List[Lesson]:
         marks = ",".join("?" * len(days))
         rows = self._db.execute(
-            f"SELECT date, hour, subject, teacher, topic, homework, files FROM lessons "
+            f"SELECT date, hour, subject, teacher, topic, homework, files, study_group FROM lessons "
             f"WHERE kid_id = ? AND date IN ({marks}) ORDER BY date, hour, id",
             (kid.id, *(d.isoformat() for d in days)),
         )
@@ -309,6 +320,43 @@ class Store:
         self._db.commit()
         row = self._db.execute(_TASK_SELECT + "WHERE t.key = ?", (key,)).fetchone()
         return _task(row), cur.rowcount == 1
+
+    def upsert_homework(
+        self, kid_id: str, date: dt.date, due_date: dt.date, slot: str, subject: str, text: str, notified: bool
+    ) -> None:
+        """Create or update the homework task of a lesson slot. An edited text
+        updates the task (and reopens its alert) instead of adding a new one."""
+        key = slot_key(kid_id, date, slot)
+        row = self._db.execute("SELECT id, text, completed FROM tasks WHERE key = ?", (key,)).fetchone()
+        if row:
+            if row[1] != text:
+                self._db.execute(
+                    "UPDATE tasks SET text = ?, todo_stale = 1, notified = ? WHERE id = ?",
+                    (text, int(notified or row[2]), row[0]),
+                )
+        # Tasks from before slot keys were keyed by their text: adopt them.
+        elif not self._db.execute(
+            "UPDATE tasks SET key = ? WHERE key = ?", (key, item_key(kid_id, date, subject, text))
+        ).rowcount:
+            self._db.execute(
+                "INSERT INTO tasks (key, kid_id, lesson_date, due_date, subject, text, source, notified) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'homework', ?)",
+                (key, kid_id, date.isoformat(), due_date.isoformat(), subject, text, int(notified)),
+            )
+        self._db.commit()
+
+    def homework_task(self, kid_id: str, date: dt.date, slot: str) -> Optional[Task]:
+        row = self._db.execute(_TASK_SELECT + "WHERE t.key = ?", (slot_key(kid_id, date, slot),)).fetchone()
+        return _task(row) if row else None
+
+    def stale_tasks(self) -> List[Task]:
+        """Tasks whose text changed after they were pushed to the task app."""
+        rows = self._db.execute(_TASK_SELECT + "WHERE t.todo_stale = 1 AND t.todo_task_id IS NOT NULL")
+        return [_task(r) for r in rows]
+
+    def clear_stale(self, task_id: int) -> None:
+        self._db.execute("UPDATE tasks SET todo_stale = 0 WHERE id = ?", (task_id,))
+        self._db.commit()
 
     def task(self, task_id: int) -> Optional[Task]:
         row = self._db.execute(_TASK_SELECT + "WHERE t.id = ?", (task_id,)).fetchone()

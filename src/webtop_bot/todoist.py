@@ -94,5 +94,8 @@ class TodoistClient:
     async def delete_task(self, list_id: str, task_id: str) -> None:
         await self._request("DELETE", f"/tasks/{task_id}")
 
+    async def update_task(self, list_id: str, task_id: str, title: str, body: str) -> None:
+        await self._request("POST", f"/tasks/{task_id}", json={"content": title[:500], "description": body})
+
     async def set_completed(self, list_id: str, task_id: str, completed: bool = True) -> None:
         await self._request("POST", f"/tasks/{task_id}/{'close' if completed else 'reopen'}")

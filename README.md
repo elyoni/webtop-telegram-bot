@@ -46,13 +46,13 @@ Your data (db, logs) lives in the `bot-data` Docker volume. Update with `git pul
 
 `/today` `/yesterday` `/tomorrow` `/week` `/date YYYY-MM-DD` `/todo` `/add <kid> <text> [YYYY-MM-DD]` `/sync` `/kids` `/help`
 
-Admins only: `/users`, `/allow <id> [name]`, `/revoke <id>`.
+Admins only: `/config` — buttons for users (approve / remove), daily summary and reminder times, Webtop sync times, and the Todoist interval. Changes apply at once and override the `.env` values.
 
 ## Setup
 
 1. Create a bot with @BotFather; put the token in `.env` (see `.env.example`, `chmod 600 .env`).
 2. Run the bot, send it `/start`, and put the id it shows in `TELEGRAM_ADMIN_IDS`.
-3. Other users send `/start`; admins get an access request with a ready `/allow <id>` command.
+3. Other users send `/start`; admins get an access request with ✅ approve / ✖ deny buttons.
    Allowed users are stored in the db and all share the same Webtop account.
    Only admins and allowed users get answers or alerts.
 4. Optional — Todoist (easiest; projects can be shared with family):
