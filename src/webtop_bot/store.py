@@ -585,11 +585,10 @@ class Store:
     # teacher-note kinds
 
     def event_types(self) -> List[tuple[str, str]]:
-        """(type, kind) for every type Webtop sent. Until chosen in /config a type is neutral,
-        except the ones Webtop itself marks as praise."""
+        """(type, kind) for every type Webtop sent. Types differ per school, so each is neutral
+        until chosen in /config."""
         rows = self._db.execute(
-            "SELECT e.type, COALESCE(k.kind, CASE WHEN MAX(e.positive) THEN 'good' ELSE 'neutral' END) "
-            "FROM events e LEFT JOIN event_kinds k ON k.type = e.type "
+            "SELECT e.type, COALESCE(k.kind, 'neutral') FROM events e LEFT JOIN event_kinds k ON k.type = e.type "
             "WHERE e.type != '' GROUP BY e.type ORDER BY e.type"
         )
         return [(r[0], r[1]) for r in rows]

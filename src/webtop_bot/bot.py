@@ -121,8 +121,8 @@ def done_button(task: Task, with_kid: bool = False) -> InlineKeyboardButton:
 
 
 def event_kind(ev: Event, chosen: Dict[str, str]) -> str:
-    """good / bad / neutral: the choice made in /config, else good for Webtop's praise type, else neutral."""
-    return chosen.get(ev.type) or ("good" if ev.positive else "neutral")
+    """good / bad / neutral: the choice made in /config, else neutral (types differ per school)."""
+    return chosen.get(ev.type, "neutral")
 
 
 def event_line(ev: Event, kind: str) -> str:

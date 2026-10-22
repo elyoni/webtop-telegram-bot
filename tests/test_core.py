@@ -424,13 +424,13 @@ class TestEventKinds:
     def add(self, store: Store, type_: str, positive: bool, event_id: int) -> None:
         store.add_events(KID.id, [Event(event_id, KID.id, DAY, type_, positive, "", "", 1, "")])
 
-    def test_unchosenTypes_eventTypes_praiseIsGoodOthersNeutral(self, store: Store) -> None:
+    def test_unchosenTypes_eventTypes_allNeutral(self, store: Store) -> None:
         # Arrange
         self.add(store, "מילה טובה", True, 1)
         self.add(store, "איחור", False, 2)
 
         # Act / Assert
-        assert store.event_types() == [("איחור", "neutral"), ("מילה טובה", "good")]
+        assert store.event_types() == [("איחור", "neutral"), ("מילה טובה", "neutral")]
 
     def test_chosenKind_eventTypes_overridesDefault(self, store: Store) -> None:
         # Arrange
@@ -447,9 +447,9 @@ class TestEventKinds:
         with pytest.raises(ValueError):
             store.set_event_kind("איחור", "awful")
 
-    def test_eventKind_choiceBeatsWebtopFlag(self) -> None:
+    def test_eventKind_webtopPraiseFlagIgnored_choiceWins(self) -> None:
         from webtop_bot.bot import event_kind
 
         ev = Event(1, KID.id, DAY, "מילה טובה", True, "", "", 1, "")
-        assert event_kind(ev, {}) == "good"
-        assert event_kind(ev, {"מילה טובה": "neutral"}) == "neutral"
+        assert event_kind(ev, {}) == "neutral"
+        assert event_kind(ev, {"מילה טובה": "good"}) == "good"

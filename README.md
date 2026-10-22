@@ -62,7 +62,7 @@ Everything is a button; only `/start`, `/help` and `/config` are commands.
     The evening before a matching lesson or activity (evening reminder, and ➡️ tomorrow) the bot adds
     "🔔 Yoav · חנג — להביא נעליים". 🗑 deletes either.
 - **Teacher notes** are 🌟 good, ⚠️ bad or ⚪ neutral. Webtop's types differ per school, so admins choose in
-  `/config` → 🏷 teacher-note types (tap to cycle). New types start neutral, except Webtop's own praise type (good).
+  `/config` → 🏷 teacher-note types (tap to cycle). Every type starts neutral (Webtop's own good/bad flag is ignored).
 - `/config` — everyone: 👦 which kids to show (per user), their own daily summary and evening reminder time (or off).
   Admins also get: users (approve / remove, make ⭐ admin), Webtop sync times and the Todoist interval (bot-wide).
   `TELEGRAM_ADMIN_IDS` are permanent admins; others can be made admins from `/config`.
