@@ -415,6 +415,78 @@ class TestActivityFlow:
         assert "כל כמה זמן" in query.edits[-1][0]
 
 
+    def test_titleThenSkipHours_nohours_savesWithoutHours(self, store: Store) -> None:
+        # Arrange
+        bot, ctx, query = TestAddTaskFlow.make_bot(store), SimpleNamespace(user_data={}), TestAddTaskFlow.query()
+        for op in ("start", "kind=weekly", "day=0", "days_done"):
+            self.run(bot, ctx, query, op)
+        ctx.user_data["act"].update(title="football", **{"await": "hours"})
+
+        # Act
+        self.run(bot, ctx, query, "nohours")
+
+        # Assert
+        assert "act" not in ctx.user_data
+        assert [(a.title, a.hours) for a in store.activities_on(dt.date(2026, 10, 19))] == [("football", "")]
+
+    def test_deleteThenUndo_restoresActivity(self, store: Store) -> None:
+        # Arrange
+        store.add_activity(KID.id, "football", frozenset({0}), None, "16:00", "17:00")
+        bot, ctx, query = TestAddTaskFlow.make_bot(store), SimpleNamespace(user_data={}), TestAddTaskFlow.query()
+        a = store.activities_on(dt.date(2026, 10, 19))[0]
+        self.run(bot, ctx, query, f"del={a.id}")
+        assert store.activities_on(dt.date(2026, 10, 19)) == []
+
+        # Act
+        self.run(bot, ctx, query, "undo")
+
+        # Assert
+        assert [(a.title, a.hours) for a in store.activities_on(dt.date(2026, 10, 19))] == [("football", "16:00-17:00")]
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("16:00-17:30", ("16:00", "17:30")),
+    ("16-17:30", ("16:00", "17:30")),
+    ("9.15 – 10", ("09:15", "10:00")),
+    ("16:00", ("16:00", "")),
+    ("17:00-16:00", None),
+    ("25:00", None),
+    ("כדורגל", None),
+])
+def test_parseHours_variousInputs(text: str, expected) -> None:
+    from webtop_bot.bot import parse_hours
+
+    assert parse_hours(text) == expected
+
+
+class TestActivityStore:
+    def test_withHours_activitiesOn_sortedByStartAndKeepHours(self, store: Store) -> None:
+        # Arrange
+        store.add_activity(KID.id, "no time", frozenset({DAY.weekday()}), None)
+        store.add_activity(KID.id, "late", frozenset({DAY.weekday()}), None, "17:00", "18:00")
+        store.add_activity(KID.id, "early", frozenset({DAY.weekday()}), None, "15:30", "")
+
+        # Act
+        found = store.activities_on(DAY)
+
+        # Assert
+        assert [(a.title, a.hours) for a in found] == [("early", "15:30"), ("late", "17:00-18:00"), ("no time", "")]
+
+    def test_deleted_readd_restoresSameFields(self, store: Store) -> None:
+        # Arrange
+        store.add_activity(KID.id, "football", frozenset({0, 2}), None, "16:00", "17:30")
+        a = store.activities_on(dt.date(2026, 10, 19))[0]
+
+        # Act
+        deleted = store.delete_activity(a.id)
+        store.add_activity(deleted.kid_id, deleted.title, deleted.weekdays, deleted.on_date, deleted.start, deleted.end)
+
+        # Assert
+        b = store.activities_on(dt.date(2026, 10, 19))[0]
+        assert (b.title, b.weekdays, b.hours) == ("football", frozenset({0, 2}), "16:00-17:30")
+        assert store.delete_activity(999) is None
+
+
 class TestReminders:
     def reminders(self, store: Store, day: dt.date):
         from webtop_bot.service import Service

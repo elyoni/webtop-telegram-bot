@@ -146,6 +146,13 @@ class Activity:
     title: str
     weekdays: frozenset[int]  # empty for a one-time activity
     on_date: Optional[dt.date]
+    start: str = ""  # "HH:MM"; "" when not given
+    end: str = ""
+
+    @property
+    def hours(self) -> str:
+        """"16:00-17:30", "16:00" or "". ASCII hyphen: it keeps the order inside Hebrew (RTL) text."""
+        return f"{self.start}-{self.end}" if self.end else self.start
 
 
 @dataclass
@@ -213,6 +220,8 @@ class Store:
         self._add_column("tasks", "todo_stale", "INTEGER NOT NULL DEFAULT 0")  # text changed since pushed
         self._add_column("users", "is_admin", "INTEGER NOT NULL DEFAULT 0")  # besides TELEGRAM_ADMIN_IDS
         self._add_column("events", "added_at", "TEXT NOT NULL DEFAULT ''")  # UTC ISO; '' = before the bot ran
+        self._add_column("activities", "start_time", "TEXT NOT NULL DEFAULT ''")  # "HH:MM"
+        self._add_column("activities", "end_time", "TEXT NOT NULL DEFAULT ''")
 
     def _add_column(self, table: str, column: str, definition: str) -> None:
         if column not in {r[1] for r in self._db.execute(f"PRAGMA table_info({table})")}:
@@ -530,21 +539,24 @@ class Store:
 
     # after-school activities
 
-    def add_activity(self, kid_id: str, title: str, weekdays: frozenset[int], on_date: Optional[dt.date]) -> None:
+    def add_activity(
+        self, kid_id: str, title: str, weekdays: frozenset[int], on_date: Optional[dt.date], start: str = "", end: str = ""
+    ) -> None:
         self._db.execute(
-            "INSERT INTO activities (kid_id, title, weekdays, on_date) VALUES (?, ?, ?, ?)",
-            (kid_id, title, ",".join(str(d) for d in sorted(weekdays)), on_date.isoformat() if on_date else None),
+            "INSERT INTO activities (kid_id, title, weekdays, on_date, start_time, end_time) VALUES (?, ?, ?, ?, ?, ?)",
+            (kid_id, title, ",".join(str(d) for d in sorted(weekdays)), on_date.isoformat() if on_date else None,
+             start, end),
         )
         self._db.commit()
 
     def _activities(self, where: str = "", params: tuple = ()) -> List[Activity]:
         rows = self._db.execute(
-            "SELECT a.id, a.kid_id, k.name, a.title, a.weekdays, a.on_date FROM activities a "
-            f"JOIN kids k ON k.id = a.kid_id {where} ORDER BY k.name, a.id", params
+            "SELECT a.id, a.kid_id, k.name, a.title, a.weekdays, a.on_date, a.start_time, a.end_time FROM activities a "
+            f"JOIN kids k ON k.id = a.kid_id {where} ORDER BY k.name, a.start_time = '', a.start_time, a.id", params
         )
         return [
             Activity(r[0], r[1], r[2], r[3], frozenset(int(d) for d in r[4].split(",") if d),
-                     dt.date.fromisoformat(r[5]) if r[5] else None)
+                     dt.date.fromisoformat(r[5]) if r[5] else None, r[6], r[7])
             for r in rows
         ]
 
@@ -555,10 +567,12 @@ class Store:
     def activities_on(self, day: dt.date) -> List[Activity]:
         return [a for a in self._activities() if day.weekday() in a.weekdays or a.on_date == day]
 
-    def delete_activity(self, activity_id: int) -> bool:
-        cur = self._db.execute("DELETE FROM activities WHERE id = ?", (activity_id,))
+    def delete_activity(self, activity_id: int) -> Optional[Activity]:
+        """The deleted activity (so it can be undone), or None if it was already gone."""
+        found = self._activities("WHERE a.id = ?", (activity_id,))
+        self._db.execute("DELETE FROM activities WHERE id = ?", (activity_id,))
         self._db.commit()
-        return cur.rowcount == 1
+        return found[0] if found else None
 
     def purge_activities_before(self, day: dt.date) -> None:
         self._db.execute("DELETE FROM activities WHERE on_date < ?", (day.isoformat(),))
@@ -577,10 +591,12 @@ class Store:
         )
         return [ReminderRule(*r) for r in rows]
 
-    def delete_reminder_rule(self, rule_id: int) -> bool:
-        cur = self._db.execute("DELETE FROM reminder_rules WHERE id = ?", (rule_id,))
+    def delete_reminder_rule(self, rule_id: int) -> Optional[ReminderRule]:
+        """The deleted rule (so it can be undone), or None if it was already gone."""
+        found = [r for r in self.reminder_rules() if r.id == rule_id]
+        self._db.execute("DELETE FROM reminder_rules WHERE id = ?", (rule_id,))
         self._db.commit()
-        return cur.rowcount == 1
+        return found[0] if found else None
 
     # teacher-note kinds
 

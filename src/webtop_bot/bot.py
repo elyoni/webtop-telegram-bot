@@ -6,6 +6,7 @@ import functools
 import hashlib
 import html
 import logging
+import re
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from telegram import Bot as TelegramBot
@@ -102,6 +103,26 @@ def short(text: str, n: int = 24) -> str:
 def keyboard(buttons: Buttons, extra_rows: Sequence[Buttons] = ()) -> Optional[InlineKeyboardMarkup]:
     rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)] + [list(r) for r in extra_rows]
     return InlineKeyboardMarkup(rows) if rows else None
+
+
+HOURS_RE = re.compile(r"(\d{1,2})(?:[:.](\d{2}))?(?:\s*-\s*(\d{1,2})(?:[:.](\d{2}))?)?")
+
+
+def parse_hours(text: str) -> Optional[Tuple[str, str]]:
+    """"16:00-17:30", "16-17:30", "16.00 - 17" or just "16:00" -> ("16:00", "17:30" or ""); None if invalid."""
+    m = HOURS_RE.fullmatch(text.replace("–", "-").replace("—", "-").strip())
+    if not m:
+        return None
+    sh, sm, eh, em = m.groups()
+    start = (int(sh), int(sm or 0))
+    end = (int(eh), int(em or 0)) if eh else None
+    if any(h > 23 or mi > 59 for h, mi in filter(None, (start, end))) or (end and end <= start):
+        return None
+    return f"{start[0]:02}:{start[1]:02}", f"{end[0]:02}:{end[1]:02}" if end else ""
+
+
+def activity_line(a: Activity) -> str:
+    return f"🎒 {e(a.title)}" + (f" ({a.hours})" if a.hours else "")
 
 
 def repeat_label(weekdays: Iterable[int]) -> str:
@@ -354,7 +375,7 @@ class Bot:
                             buttons.append(done_button(status, with_kid=len(kid_lessons) > 1))
                     if task:
                         lines.append(f"    <i>{e(text)}</i>")
-                lines += [f"🎒 {e(a.title)}" for a in activities[day] if a.kid_id == kid.id]
+                lines += [activity_line(a) for a in activities[day] if a.kid_id == kid.id]
             kid_events = [ev for ev in events if ev.kid_id == kid.id]
             if kid_events:
                 lines.append("\n<u>הערות מורים</u>")
@@ -374,7 +395,7 @@ class Bot:
         for kid, lessons in kid_lessons:
             lines = [f"👦 <b>{e(kid.name)}</b> ({kid.class_label})"]
             lines += [f"{l.hour}. {e(l.subject)}" for l in lessons if l.date == day] or ["אין שיעורים"]
-            lines += [f"🎒 {e(a.title)}" for a in activities if a.kid_id == kid.id]
+            lines += [activity_line(a) for a in activities if a.kid_id == kid.id]
             parts.append("\n".join(lines))
         text = f"<u>{day_label(day)}</u>\n\n" + "\n\n".join(parts)
         reminders = [r for r in self.service.reminders_for(day) if r.kid_id not in hidden]
@@ -860,7 +881,8 @@ class Bot:
 
     # --- activities (חוגים) and lesson reminders ----------------------------
 
-    def _activities_screen(self, user_id: int) -> Tuple[str, List[Buttons]]:
+    def _activities_screen(self, user_id: int, undo: Optional[InlineKeyboardButton] = None) -> Tuple[str, List[Buttons]]:
+        """The list with 🗑 per item; `undo`: a "↩️ undo" button for the item just deleted."""
         btn = InlineKeyboardButton
         today = self.cfg.today()
         self.store.purge_activities_before(today)
@@ -869,7 +891,8 @@ class Bot:
         rules = [r for r in self.store.reminder_rules() if r.kid_id not in hidden]
 
         def when(a: Activity) -> str:
-            return repeat_label(a.weekdays) if a.weekdays else f"{a.on_date:%d/%m}"
+            day = repeat_label(a.weekdays) if a.weekdays else f"{a.on_date:%d/%m}"
+            return f"{day} {a.hours}" if a.hours else day
 
         lines = ["🎒 <b>חוגים ואירועים</b>"]
         lines += [f"• {e(a.kid_name.split()[0])} · {when(a)} — {e(a.title)}" for a in activities] or ["אין"]
@@ -881,6 +904,8 @@ class Bot:
         rows += [[btn(f"🗑 🔔 {short(r.match)} → {short(r.note)}", callback_data=f"rem:del={r.id}")] for r in rules]
         rows.append([btn("➕ חוג / אירוע", callback_data="act:start"), btn("🔔 תזכורת חדשה", callback_data="rem:start")])
         rows.append([btn("✖ סגירה", callback_data="act:close")])
+        if undo:
+            rows.insert(0, [undo])
         return "\n".join(lines), rows
 
     async def cmd_activities(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -906,7 +931,20 @@ class Bot:
                 await self._edit(query, "בוטל")
             return
         if name == "del" and value.isdigit():
-            await query.answer("🗑 נמחק" if self.store.delete_activity(int(value)) else "כבר נמחק")
+            deleted = self.store.delete_activity(int(value))
+            await query.answer("🗑 נמחק" if deleted else "כבר נמחק")
+            undo = None
+            if deleted:
+                context.user_data["act_undo"] = deleted
+                undo = btn(f"↩️ בטל מחיקה: {short(deleted.title)}", callback_data="act:undo")
+            text, rows = self._activities_screen(user_id, undo)
+            await self._edit(query, text, rows)
+            return
+        if name == "undo":
+            a = context.user_data.pop("act_undo", None)
+            if a:
+                self.store.add_activity(a.kid_id, a.title, a.weekdays, a.on_date, a.start, a.end)
+            await query.answer("↩️ שוחזר" if a else "אין מה לשחזר")
             text, rows = self._activities_screen(user_id)
             await self._edit(query, text, rows)
             return
@@ -972,13 +1010,15 @@ class Bot:
             await self._ask_activity_text(query, state, "title")
         elif name == "other":
             await self._ask_activity_text(query, state, "date")
+        elif name == "nohours" and state.get("await") == "hours":
+            await self._edit(query, self._save_activity(context, state, "", ""))
         else:
             logger.warning("Bad activity callback %r from %s", op, user_id)
 
     async def _ask_activity_text(self, query: CallbackQuery, state: Dict, step: str) -> None:
         state["await"] = step
         prompt = ("📅 כתבו תאריך: <code>DD/MM</code> או <code>DD/MM/YYYY</code>" if step == "date"
-                  else "✏️ כתבו את השם (למשל: כדורגל 16:00, יום הולדת של דנה)")
+                  else "✏️ כתבו את השם (למשל: כדורגל, יום הולדת של דנה)")
         await self._edit(query, f"➕ <b>חוג / אירוע חדש</b>\n{prompt}",
                          [[InlineKeyboardButton("✖ ביטול", callback_data="act:cancel")]])
 
@@ -1007,19 +1047,34 @@ class Bot:
             state["on_date"], state["await"] = day.isoformat(), "title"
             await self.reply(update, "✏️ כתבו את השם (למשל: יום הולדת של דנה)")
             return
+        if state["await"] == "hours":
+            hours = parse_hours(text)
+            if not hours:
+                await self.reply(update, "שעה לא תקינה. דוגמה: 16:00-17:30")
+                return
+            await self.reply(update, self._save_activity(context, state, *hours))
+            return
         if not text or len(text) > MAX_TASK_TEXT:
             await self.reply(update, f"הטקסט צריך להיות עד {MAX_TASK_TEXT} תווים. נסו שוב.")
             return
+        state["title"], state["await"] = text, "hours"
+        btn = InlineKeyboardButton
+        await self.reply(update, "⏰ באיזו שעה? כתבו התחלה-סיום, למשל <code>16:00-17:30</code>",
+                         extra_rows=[[btn("⏭ בלי שעה", callback_data="act:nohours")],
+                                     [btn("✖ ביטול", callback_data="act:cancel")]])
+
+    def _save_activity(self, context: ContextTypes.DEFAULT_TYPE, state: Dict, start: str, end: str) -> str:
+        """Store the activity the flow collected; returns the confirmation text."""
         context.user_data.pop("act", None)
         kid = next((k for k in self.store.kids() if k.id == state["kid"]), None)
         if not kid:
-            await self.reply(update, "הילד לא נמצא — התחילו מחדש (☰ עוד ← 🎒 חוגים)")
-            return
+            return "הילד לא נמצא — התחילו מחדש (☰ עוד ← 🎒 חוגים)"
         weekdays = frozenset(state.get("weekdays", []))
         on_date = dt.date.fromisoformat(state["on_date"]) if state.get("on_date") else None
-        self.store.add_activity(kid.id, text, weekdays, on_date)
+        self.store.add_activity(kid.id, state["title"], weekdays, on_date, start, end)
         when = repeat_label(weekdays) if weekdays else f"{on_date:%d/%m}"
-        await self.reply(update, f"🎒 נוסף: {e(text)}\n{e(kid.first_name)} · {when}")
+        hours = f"{start}-{end}" if end else start
+        return f"🎒 נוסף: {e(state['title'])}\n{e(kid.first_name)} · {when}" + (f" · {hours}" if hours else "")
 
     async def _reminder_action(self, query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, op: str) -> None:
         """🔔 new reminder rule: kid (or all) → text to match → note. Choices live in user_data["rem"]."""
@@ -1033,7 +1088,20 @@ class Bot:
             await self._edit(query, "בוטל")
             return
         if name == "del" and value.isdigit():
-            await query.answer("🗑 נמחקה" if self.store.delete_reminder_rule(int(value)) else "כבר נמחקה")
+            deleted = self.store.delete_reminder_rule(int(value))
+            await query.answer("🗑 נמחקה" if deleted else "כבר נמחקה")
+            undo = None
+            if deleted:
+                context.user_data["rem_undo"] = deleted
+                undo = btn(f"↩️ בטל מחיקה: {short(deleted.match)}", callback_data="rem:undo")
+            text, rows = self._activities_screen(user_id, undo)
+            await self._edit(query, text, rows)
+            return
+        if name == "undo":
+            r = context.user_data.pop("rem_undo", None)
+            if r:
+                self.store.add_reminder_rule(r.kid_id, r.match, r.note)
+            await query.answer("↩️ שוחזרה" if r else "אין מה לשחזר")
             text, rows = self._activities_screen(user_id)
             await self._edit(query, text, rows)
             return
