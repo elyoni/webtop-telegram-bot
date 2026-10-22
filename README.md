@@ -1,7 +1,7 @@
 # webtop-bot
 
 Telegram bot for parents: daily Webtop (SmartSchool) homework digests, new-homework alerts,
-and a shared to-do list in **Todoist** or **Microsoft To Do**. Built on
+and a shared to-do list (in Telegram, optionally mirrored to **Todoist**). Built on
 [pywebtop](https://github.com/elyoni/pywebtop) (installed automatically).
 
 Each family runs its own copy: one bot, one Webtop parent account, any number of kids.
@@ -58,20 +58,21 @@ Changes apply at once and override the `.env` defaults.
 3. Other users send `/start`; admins get an access request with ✅ approve / ✖ deny buttons.
    Allowed users are stored in the db and all share the same Webtop account.
    Only admins and allowed users get answers or alerts.
-4. Optional — Todoist (easiest; projects can be shared with family):
-   Todoist → Settings → Integrations → Developer → copy the API token into `TODOIST_TOKEN`.
-   The bot creates one project "שיעורי בית" with a section per kid (free plan: 5 projects); share it from the Todoist app.
-   If both `TODOIST_TOKEN` and `MS_CLIENT_ID` are set, Todoist is used.
+4. To-do list: works in Telegram out of the box (`/todo`, `/add`, ✅ buttons), no extra setup.
+   Tasks live in the bot's SQLite db. Optional: mirror them to Todoist (below).
+
+   | | Telegram only (default) | + Todoist (optional) |
+   |---|---|---|
+   | Setup | none | one API token |
+   | Cost | free | free plan is enough (5 projects) |
+   | Family sharing | via the bot chat | share the project from the Todoist app |
+   | Add / tick tasks | `/add`, ✅ buttons | also in the Todoist app; bot picks them up |
+   | Why Todoist | | token from Settings, no app registration; sections per kid; shared projects |
+
+   Todoist setup: Todoist → Settings → Integrations → Developer → copy the API token into `TODOIST_TOKEN`.
+   The bot creates one project "שיעורי בית" with a section per kid; share it from the Todoist app.
    Every `TODO_POLL_MINUTES` (default 10) the bot mirrors the app: tasks added in a kid's section are
    announced in Telegram, and done / reopened / deleted (= done) status is copied. Edits in the app are not.
-5. Optional — Microsoft To Do (needs an Azure directory; personal accounts alone can no longer register apps):
-   1. portal.azure.com → Entra ID → App registrations → New: *Personal Microsoft accounts only*, no redirect URI.
-   2. Authentication → *Allow public client flows* = Yes.
-   3. API permissions → Microsoft Graph → Delegated → `Tasks.ReadWrite`.
-   4. Put the Application (client) ID in `MS_CLIENT_ID`, then run `webtop-bot login-microsoft` once
-      and follow the device-code prompt. The token cache is stored in `DATA_DIR` (mode 600).
-
-   Without `TODOIST_TOKEN` or `MS_CLIENT_ID`, tasks are tracked only in the bot's SQLite db.
 
 ### Run without Docker
 
@@ -80,15 +81,35 @@ Needs [uv](https://docs.astral.sh/uv/) and git.
 ```sh
 uv sync
 set -a; . ./.env; set +a     # or direnv (`.envrc` = `dotenv`)
-uv run webtop-bot login-microsoft   # once, if using To Do
 uv run webtop-bot run
 uv run --with pytest pytest -q    # unit tests (no network)
 ```
 
-### Docker: Microsoft To Do login
+### Versions: dev vs release
+
+|                  | How to get it                                                                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Last release** | `docker pull elyoni/webtop-bot:latest` (or a pinned `:0.3.0`). Source: latest `vX.Y.Z` [tag](https://github.com/elyoni/webtop-telegram-bot/tags). |
+| **Last dev**     | `main` branch, no published image: `git clone https://github.com/elyoni/webtop-telegram-bot.git && docker compose up -d --build`.                 |
+
+To run the released image, replace `build: .` in `compose.yml` with `image: elyoni/webtop-bot:latest`.
+
+### CI / release (GitHub Actions)
+
+`.github/workflows/ci.yml`:
+
+- **Every push to `main` and every PR:** unit tests.
+- **New tag `vX.Y.Z` only:** tests, then build and push to Docker Hub as `:X.Y.Z` and `:latest`.
+  The tag must equal `version` in `pyproject.toml` (job fails otherwise).
+
+One-time setup: repo → Settings → Secrets and variables → Actions → add `DOCKERHUB_USERNAME`
+and `DOCKERHUB_TOKEN` (Docker Hub → Account settings → Personal access tokens, Read & Write).
+
+Release:
 
 ```sh
-docker compose run --rm bot webtop-bot login-microsoft   # once, before `docker compose up -d`
+# bump version in pyproject.toml, commit, then:
+git tag v0.3.1 && git push origin main v0.3.1
 ```
 
 ### Developing pywebtop alongside
