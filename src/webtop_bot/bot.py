@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
+import hashlib
 import html
 import logging
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -42,21 +43,18 @@ DAY_NAMES = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "ש
 MAX_MESSAGE = 3900  # Telegram's limit is 4096
 
 COMMANDS = [
-    BotCommand("today", "שיעורי בית היום"),
-    BotCommand("yesterday", "יום הלימודים הקודם"),
-    BotCommand("tomorrow", "יום הלימודים הבא"),
-    BotCommand("week", "השבוע"),
-    BotCommand("date", "תאריך: /date YYYY-MM-DD"),
-    BotCommand("todo", "משימות פתוחות"),
-    BotCommand("add", "הוספת משימה: /add <ילד> <טקסט> [YYYY-MM-DD]"),
-    BotCommand("sync", "עדכון מ-Webtop"),
-    BotCommand("kids", "בחירת ילדים להצגה"),
-    BotCommand("config", "הגדרות: שעות הסיכום והתזכורת שלי"),
+    BotCommand("config", "הגדרות: ילדים, שעות הסיכום והתזכורת"),
     BotCommand("help", "עזרה ומקרא סימנים"),
 ]
 ADMIN_CONFIG = {"users", "sync_times", "todo_poll", "approve", "deny", "admin", "revoke", "revoke?"}
 SCHOOL_DAYS = (0, 1, 2, 3, 4, 5)  # PTB: 0 = Sunday
 EVENINGS_BEFORE_SCHOOL = (0, 1, 2, 3, 4, 6)  # Sun-Thu and Saturday
+RECURRING_AT = dt.time(6, 0)  # when the day's recurring tasks are created
+WEEKDAYS_SUNDAY_FIRST = (6, 0, 1, 2, 3, 4, 5)  # date.weekday() numbers
+SHORT_DAYS = {6: "א׳", 0: "ב׳", 1: "ג׳", 2: "ד׳", 3: "ה׳", 4: "ו׳", 5: "ש׳"}
+SCHOOL_WEEKDAYS = frozenset({6, 0, 1, 2, 3, 4})
+MAX_TASK_TEXT = 200
+DUE_CHOICES = 7  # days offered for a one-time task
 
 # Persistent keyboard: button text -> command name.
 MENU_BUTTONS = {
@@ -91,10 +89,23 @@ def short(text: str, n: int = 24) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
-def keyboard(buttons: Buttons) -> Optional[InlineKeyboardMarkup]:
-    if not buttons:
-        return None
-    return InlineKeyboardMarkup([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
+def keyboard(buttons: Buttons, extra_rows: Sequence[Buttons] = ()) -> Optional[InlineKeyboardMarkup]:
+    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)] + [list(r) for r in extra_rows]
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def repeat_label(weekdays: Iterable[int]) -> str:
+    days = frozenset(weekdays)
+    if days == SCHOOL_WEEKDAYS:
+        return "כל יום לימודים"
+    if len(days) == 7:
+        return "כל יום"
+    return "בימים " + ", ".join(SHORT_DAYS[d] for d in WEEKDAYS_SUNDAY_FIRST if d in days)
+
+
+def kid_token(kid: Kid) -> str:
+    """Short stand-in for a kid id in callback data (limited to 64 bytes; Hebrew names are long)."""
+    return hashlib.sha1(kid.id.encode()).hexdigest()[:10]
 
 
 def done_button(task: Task, with_kid: bool = False) -> InlineKeyboardButton:
@@ -111,15 +122,6 @@ def event_line(ev: Event) -> str:
     if ev.teacher:
         line += f" ({e(ev.teacher)})"
     return line + (f" — <i>{e(ev.remark)}</i>" if ev.remark else "")
-
-
-def kids_keyboard(kids: List[Kid], hidden: set[str]) -> InlineKeyboardMarkup:
-    """One toggle per kid: ✅ shown, ⬜ hidden."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{'⬜' if k.id in hidden else '✅'} {k.first_name} ({k.class_label})",
-                              callback_data=f"kid:{k.id}")]
-        for k in kids
-    ])
 
 
 class Bot:
@@ -152,21 +154,18 @@ class Bot:
             .build()
         )
         app.add_handler(CommandHandler(["start", "help"], self.cmd_start))
+        # Reached from the persistent menu buttons only (see MENU_BUTTONS), not as /commands.
         self.commands = {
             "today": self.cmd_today,
             "yesterday": self.cmd_yesterday,
             "tomorrow": self.cmd_tomorrow,
             "week": self.cmd_week,
-            "date": self.cmd_date,
             "todo": self.cmd_todo,
-            "add": self.cmd_add,
             "sync": self.cmd_sync,
-            "kids": self.cmd_kids,
         }
-        for name, handler in self.commands.items():
-            app.add_handler(CommandHandler(name, self._guard(handler)))
         app.add_handler(CommandHandler("config", self._guard(self.cmd_config)))
         app.add_handler(MessageHandler(filters.Text(list(MENU_BUTTONS)), self._guard(self.on_menu)))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._guard(self.on_text)))
         app.add_handler(CallbackQueryHandler(self._guard(self.on_button)))
         app.add_error_handler(self.on_error)
 
@@ -177,7 +176,7 @@ class Bot:
 
     def schedule_jobs(self, jq: JobQueue) -> None:
         """(Re)create the scheduled jobs from the current settings."""
-        for name in ("digest", "reminder", "sync", "todo_poll"):
+        for name in ("digest", "reminder", "sync", "todo_poll", "recurring"):
             for job in jq.get_jobs_by_name(name):
                 job.schedule_removal()
         st, tz = self.settings, self.cfg.tz
@@ -191,6 +190,7 @@ class Bot:
                     users_at.setdefault(at, []).append(user_id)
             for at, user_ids in users_at.items():
                 jq.run_daily(callback, at.replace(tzinfo=tz), days=days, name=name, data=tuple(user_ids))
+        jq.run_daily(self.job_recurring, RECURRING_AT.replace(tzinfo=tz), name="recurring")
         for at in st.sync_times:
             jq.run_daily(self.job_sync, at.replace(tzinfo=tz), name="sync")
         if self.service.todo and st.todo_poll_minutes:
@@ -201,6 +201,7 @@ class Bot:
         for chat_id in self.allowed_ids():
             await self._set_commands(app.bot, chat_id)
         await self.service.delete_orphans()
+        await self.service.create_recurring_tasks()  # in case the bot was down at 06:00
         await self.service.push_to_todo()  # e.g. after switching the task app
 
     async def _set_commands(self, bot: TelegramBot, chat_id: int) -> None:
@@ -211,6 +212,7 @@ class Bot:
 
     async def on_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.args = []
+        context.user_data.pop("new", None)  # leaving a half-finished "new task"
         await self.commands[MENU_BUTTONS[update.effective_message.text]](update, context)
 
     def _guard(self, handler: Handler) -> Handler:
@@ -256,11 +258,13 @@ class Bot:
             except Exception as ex:
                 logger.warning("Could not send to chat %s: %s", chat_id, ex)
 
-    async def reply(self, update: Update, text: str, buttons: Buttons = ()) -> None:
-        await self._send_chunks(lambda t, m: update.effective_message.reply_text(t, reply_markup=m), text, buttons)
+    async def reply(self, update: Update, text: str, buttons: Buttons = (), extra_rows: Sequence[Buttons] = ()) -> None:
+        await self._send_chunks(
+            lambda t, m: update.effective_message.reply_text(t, reply_markup=m), text, buttons, extra_rows
+        )
 
     @staticmethod
-    async def _send_chunks(send, text: str, buttons: Buttons) -> None:
+    async def _send_chunks(send, text: str, buttons: Buttons, extra_rows: Sequence[Buttons] = ()) -> None:
         """Split long text on blank lines; buttons go on the last chunk."""
         chunks, current = [], ""
         for block in text.split("\n\n"):
@@ -271,7 +275,7 @@ class Bot:
                 current = f"{current}\n\n{block}" if current else block
         chunks.append(current)
         for i, chunk in enumerate(chunks):
-            await send(chunk[:4096], keyboard(list(buttons)) if i == len(chunks) - 1 else None)
+            await send(chunk[:4096], keyboard(list(buttons), extra_rows) if i == len(chunks) - 1 else None)
 
     # --- formatting -----------------------------------------------------
 
@@ -285,7 +289,7 @@ class Bot:
             events = self.store.events(days)
         kid_lessons = [(kid, lessons) for kid, lessons in kid_lessons if kid.id not in hidden]
         if not kid_lessons and hidden:
-            return "כל הילדים מוסתרים — /kids", [], []
+            return "כל הילדים מוסתרים — ⚙️ /config", [], []
         parts: List[str] = []
         buttons: Buttons = []
         shown: List[int] = []
@@ -334,7 +338,7 @@ class Bot:
         """Just the day's timetable: hour and subject."""
         kid_lessons = [(kid, lessons) for kid, lessons in kid_lessons if kid.id not in hidden]
         if not kid_lessons:
-            return "כל הילדים מוסתרים — /kids" if hidden else "אין נתונים"
+            return "כל הילדים מוסתרים — ⚙️ /config" if hidden else "אין נתונים"
         parts = []
         for kid, lessons in kid_lessons:
             lines = [f"👦 <b>{e(kid.name)}</b> ({kid.class_label})"]
@@ -368,28 +372,19 @@ class Bot:
             return
         text = (
             "📚 <b>בוט שיעורי בית</b>\n\n"
-            "<b>פקודות</b>\n"
-            "/today — שיעורי היום ושיעורי הבית\n"
-            "/yesterday — יום הלימודים הקודם (להוסיף משימות ששכחנו)\n"
-            "/tomorrow — מערכת השעות של מחר\n"
-            "/week — השבוע\n"
-            "/date YYYY-MM-DD — יום מסוים\n"
-            "/todo — משימות פתוחות\n"
-            "/add &lt;ילד&gt; &lt;טקסט&gt; [YYYY-MM-DD] — הוספת משימה\n"
-            "/kids — בחירת ילדים להצגה (לכל משתמש בנפרד)\n"
-            "/sync — עדכון מ-Webtop (פעם ב-30 דק׳)\n"
-            "/help — העזרה הזו\n\n"
+            "<b>כפתורים</b>\n"
+            "📅 היום · ⬅️ אתמול · ➡️ מחר · 🗓 השבוע — שיעורים ושיעורי בית\n"
+            "📋 משימות — משימות פתוחות, ➕ משימה חדשה (חד פעמית או קבועה), 🔁 קבועות\n"
+            "🔄 עדכון — עדכון מ-Webtop (פעם ב-30 דק׳)\n"
+            "✅ סימון משימה כבוצעה (↩️ ביטול)\n\n"
             "<b>סימנים</b>\n"
             "✅ משימה בוצעה\n"
             "⬜ משימה פתוחה\n"
             "בלי סימן — המורה רשם/ה רק נושא, אין שיעורי בית\n"
             "❓ המורה לא רשם/ה כלום על השיעור\n"
             "🌟 / ⚠️ הערת מורה: חיובית / שלילית\n\n"
-            "<b>כפתורים</b>\n"
-            "✅ סימון משימה כבוצעה (↩️ ביטול)\n"
-            "שכחנו משהו? /add"
+            "/config — ילדים להצגה, שעות הסיכום והתזכורת שלך"
         )
-        text += "\n\n/config — שעות הסיכום והתזכורת שלך"
         if self.is_admin(chat_id):
             text += "\nמנהלים: גם משתמשים ומנהלים, זמני עדכון מ-Webtop, Todoist"
         await update.effective_message.reply_text(text, reply_markup=MENU)
@@ -415,7 +410,7 @@ class Bot:
 
     def freshness(self) -> str:
         last = self.service.last_sync()
-        return f"🕒 עודכן {last:%d/%m %H:%M}" if last else "🕒 טרם עודכן — /sync"
+        return f"🕒 עודכן {last:%d/%m %H:%M}" if last else "🕒 טרם עודכן — 🔄 עדכון"
 
     async def _show(self, update: Update, days: List[dt.date]) -> None:
         stored = set(self.service.stored_days())
@@ -447,46 +442,18 @@ class Bot:
         sunday = week_start(today + dt.timedelta(days=1) if not is_school_day(today) else today)
         await self._show(update, [sunday + dt.timedelta(days=i) for i in range(6)])
 
-    async def cmd_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        try:
-            day = dt.date.fromisoformat(context.args[0])
-        except (IndexError, ValueError):
-            await self.reply(update, "Usage: /date YYYY-MM-DD")
-            return
-        await self._show(update, [day])
-
     async def cmd_todo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._pull_from_todo(context)
         hidden = self.store.hidden_kids(update.effective_user.id)
         tasks = [t for t in self.store.open_tasks(due_from=self.cfg.today() - dt.timedelta(days=7))
                  if t.kid_id not in hidden]
+        controls = [[InlineKeyboardButton("➕ משימה חדשה", callback_data="add:start"),
+                     InlineKeyboardButton("🔁 קבועות", callback_data="rec:list")]]
         if not tasks:
-            await self.reply(update, "🎉 אין משימות פתוחות")
+            await self.reply(update, "🎉 אין משימות פתוחות", extra_rows=controls)
             return
-        await self.reply(update, *self.render_tasks(tasks, "📋 משימות פתוחות"))
-
-    async def cmd_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        args = list(context.args)
-        if len(args) < 2:
-            await self.reply(update, "Usage: /add &lt;kid&gt; &lt;text&gt; [YYYY-MM-DD]")
-            return
-        matches = [k for k in self.store.kids() if args[0] in k.name]
-        if len(matches) != 1:
-            names = ", ".join(e(k.first_name) for k in self.store.kids())
-            await self.reply(update, f"Kid {e(args[0])!r} not found or ambiguous. Kids: {names}")
-            return
-        due = next_school_day(self.cfg.today())
-        try:
-            due = dt.date.fromisoformat(args[-1])
-            args = args[:-1]
-        except ValueError:
-            pass
-        text = " ".join(args[1:]).strip()
-        if not text:
-            await self.reply(update, "Usage: /add &lt;kid&gt; &lt;text&gt; [YYYY-MM-DD]")
-            return
-        task = await self.service.add_manual(matches[0], text, due)
-        await self.reply(update, f"➕ נוסף: {e(task.text)} ({e(matches[0].first_name)}, ל-{due:%d/%m})", [done_button(task)])
+        text, buttons = self.render_tasks(tasks, "📋 משימות פתוחות")
+        await self.reply(update, text, buttons, controls)
 
     async def cmd_sync(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Manual Webtop update, rate limited (SYNC_COOLDOWN_MINUTES, shared by all users)."""
@@ -506,16 +473,6 @@ class Bot:
         if new:
             await self._announce(context, new)
         await self.reply(update, f"✅ עודכן. שיעורי בית חדשים: {len(new)}")
-
-    async def cmd_kids(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        kids = self.store.kids()
-        if not kids:
-            await self.reply(update, "אין נתונים עדיין — /sync")
-            return
-        hidden = self.store.hidden_kids(update.effective_user.id)
-        await update.effective_message.reply_text(
-            "👦 <b>אילו ילדים להציג?</b> (לחיצה מחליפה)", reply_markup=kids_keyboard(kids, hidden)
-        )
 
     # --- admin ----------------------------------------------------------
 
@@ -539,6 +496,12 @@ class Bot:
                 rows.append([btn(("✅ " if not current else "") + "כבוי", callback_data=f"cfg:{name}={OFF}")])
             return rows + [back]
 
+        if screen == "kids":
+            kids, hidden = self.store.kids(), self.store.hidden_kids(user_id)
+            rows = [[btn(f"{'⬜' if k.id in hidden else '✅'} {k.first_name} ({k.class_label})",
+                         callback_data=f"cfg:kid={kid_token(k)}")] for k in kids]
+            text = "👦 <b>אילו ילדים להציג?</b> (לכל משתמש בנפרד; לחיצה מחליפה)"
+            return (text if kids else "אין נתונים עדיין — לחצו 🔄 עדכון"), InlineKeyboardMarkup(rows + [back])
         if screen in ("digest_time", "reminder_time"):
             title = {"digest_time": "📚 <b>הסיכום היומי שלך</b> (א׳–ו׳)",
                      "reminder_time": "⏰ <b>תזכורת הערב שלך</b> (משימות פתוחות למחר)"}[screen]
@@ -574,7 +537,10 @@ class Bot:
             return f"להסיר את {e(name)} מהבוט?", InlineKeyboardMarkup([
                 [btn("🚫 כן, להסיר", callback_data=f"cfg:revoke={uid}"), btn("ביטול", callback_data="cfg:users")]
             ])
+        kids = self.store.kids()
+        shown = len(kids) - len(self.store.hidden_kids(user_id) & {k.id for k in kids})
         rows = [
+            [btn(f"👦 ילדים להצגה: {shown}/{len(kids)}", callback_data="cfg:kids")],
             [btn(f"📚 הסיכום היומי שלי: {fmt(st.user_time(user_id, 'digest_time'))}", callback_data="cfg:digest_time")],
             [btn(f"⏰ תזכורת הערב שלי: {fmt(st.user_time(user_id, 'reminder_time'))}",
                  callback_data="cfg:reminder_time")],
@@ -617,6 +583,12 @@ class Bot:
                     raise ValueError(value)
                 st.set_todo_poll_minutes(minutes)
                 screen, note, reschedule = "main", "נשמר", True
+            elif name == "kid" and value:
+                kid = next((k for k in self.store.kids() if kid_token(k) == value), None)
+                if not kid:
+                    raise ValueError(value)
+                self.store.set_kid_hidden(user_id, kid.id, kid.id not in self.store.hidden_kids(user_id))
+                screen = "kids"
             elif name == "approve":
                 uid = int(value)
                 await self._allow(context.bot, uid, st.pending_users().get(uid, ""), user_id)
@@ -676,26 +648,167 @@ class Bot:
         if action in ("done", "undo"):
             await self._toggle_done(query, int(raw_id), done=action == "done")
             return
-        if action == "kid":
-            await self._toggle_kid(query, raw_id)
+        if action == "add":
+            await self._add_action(query, context, raw_id)
+            return
+        if action == "rec":
+            await self._recurring_action(query, raw_id)
             return
         if action == "cfg":
             await self._config_action(query, context, raw_id)
             return
-        await query.answer("הכפתור הזה כבר לא פעיל — /today")
+        await query.answer("הכפתור הזה כבר לא פעיל — לחצו על 📅 היום")
 
-    async def _toggle_kid(self, query: CallbackQuery, kid_id: str) -> None:
-        """Show / hide a kid for the user who pressed, and redraw the /kids toggles."""
+    # --- new task / recurring tasks ----------------------------------------
+
+    async def _edit(self, query: CallbackQuery, text: str, rows: Sequence[Buttons] = ()) -> None:
+        try:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([list(r) for r in rows]) if rows else None)
+        except BadRequest as ex:  # "message is not modified"
+            logger.debug("Redraw skipped: %s", ex)
+
+    async def _add_action(self, query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, op: str) -> None:
+        """➕ new task: kid → once / every school day / chosen weekdays → (date or days) → text.
+        The choices live in user_data["new"] until the text arrives (see on_text)."""
+        btn = InlineKeyboardButton
+        name, _, value = op.partition("=")
         user_id = query.from_user.id
-        kids = self.store.kids()
-        kid = next((k for k in kids if k.id == kid_id), None)
-        if not kid:
-            await query.answer("Kid not found")
+        cancel = [btn("✖ ביטול", callback_data="add:cancel")]
+        state: Dict = context.user_data.get("new") or {}
+        if name == "cancel":
+            context.user_data.pop("new", None)
+            await query.answer()
+            await self._edit(query, "בוטל")
             return
-        hide = kid_id not in self.store.hidden_kids(user_id)
-        self.store.set_kid_hidden(user_id, kid_id, hide)
-        await query.answer(f"{'⬜ הוסתר' if hide else '✅ מוצג'}: {kid.first_name}")
-        await query.edit_message_reply_markup(kids_keyboard(kids, self.store.hidden_kids(user_id)))
+        if name == "start":
+            hidden = self.store.hidden_kids(user_id)
+            kids = [k for k in self.store.kids() if k.id not in hidden]
+            if not kids:
+                await query.answer("אין ילדים להצגה — ⚙️ /config")
+                return
+            state = context.user_data["new"] = {}
+            if len(kids) == 1:
+                state["kid"] = kids[0].id
+                name = "kid"
+            else:
+                await query.answer()
+                rows = [[btn(f"👦 {k.first_name}", callback_data=f"add:kid={kid_token(k)}")] for k in kids]
+                await self._edit(query, "➕ <b>משימה חדשה</b>\nלמי?", rows + [cancel])
+                return
+        if not state or (name != "kid" and "kid" not in state):
+            await query.answer("פג תוקף — התחילו מחדש (📋 משימות)")
+            return
+        if name == "kid" and value:
+            kid = next((k for k in self.store.kids() if kid_token(k) == value), None)
+            if not kid:
+                await query.answer("הילד לא נמצא")
+                return
+            state["kid"] = kid.id
+        await query.answer()
+        if name == "kid":
+            rows = [[btn("1️⃣ פעם אחת", callback_data="add:mode=once")],
+                    [btn("📆 כל יום לימודים", callback_data="add:mode=daily")],
+                    [btn("🗓 בימים קבועים בשבוע", callback_data="add:mode=weekly")]]
+            await self._edit(query, "➕ <b>משימה חדשה</b>\nכל כמה זמן?", rows + [cancel])
+        elif name == "mode" and value == "once":
+            today = self.cfg.today()
+            days = [today + dt.timedelta(days=i) for i in range(DUE_CHOICES)]
+            rows = [[btn(day_label(d) + (" · היום" if d == today else ""), callback_data=f"add:due={d.isoformat()}")]
+                    for d in days]
+            await self._edit(query, "➕ <b>משימה חדשה</b>\nלאיזה תאריך?", rows + [cancel])
+        elif name == "mode" and value == "daily":
+            state["weekdays"] = sorted(SCHOOL_WEEKDAYS)
+            await self._ask_text(query, state)
+        elif name == "mode" and value == "weekly":
+            state["weekdays"] = []
+            await self._edit_weekdays(query, state)
+        elif name == "due":
+            try:
+                due = dt.date.fromisoformat(value)
+            except ValueError:
+                await query.answer("תאריך לא תקין")
+                return
+            today = self.cfg.today()
+            if not today <= due < today + dt.timedelta(days=DUE_CHOICES):
+                await query.answer("תאריך לא תקין")
+                return
+            state["due"] = due.isoformat()
+            await self._ask_text(query, state)
+        elif name == "day" and value.isdigit() and int(value) in SHORT_DAYS:
+            days = set(state.get("weekdays", []))
+            days ^= {int(value)}
+            state["weekdays"] = sorted(days)
+            await self._edit_weekdays(query, state)
+        elif name == "days_done":
+            if not state.get("weekdays"):
+                await query.answer("בחרו לפחות יום אחד", show_alert=False)
+                return
+            await self._ask_text(query, state)
+        else:
+            logger.warning("Bad add callback %r from %s", op, user_id)
+
+    async def _edit_weekdays(self, query: CallbackQuery, state: Dict) -> None:
+        btn = InlineKeyboardButton
+        chosen = set(state.get("weekdays", []))
+        rows = [[btn(("✅ " if d in chosen else "⬜ ") + f"יום {SHORT_DAYS[d]}", callback_data=f"add:day={d}")
+                 for d in WEEKDAYS_SUNDAY_FIRST[i : i + 4]] for i in range(0, 7, 4)]
+        rows.append([btn("המשך ➡️", callback_data="add:days_done")])
+        rows.append([btn("✖ ביטול", callback_data="add:cancel")])
+        await self._edit(query, "➕ <b>משימה חדשה</b>\nאילו ימים? (לחיצה מחליפה)", rows)
+
+    async def _ask_text(self, query: CallbackQuery, state: Dict) -> None:
+        state["await_text"] = True
+        await self._edit(query, "➕ <b>משימה חדשה</b>\n✏️ כתבו עכשיו את המשימה (הודעה אחת)",
+                         [[InlineKeyboardButton("✖ ביטול", callback_data="add:cancel")]])
+
+    async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """The text of a new task, after the ➕ choices; other messages are ignored."""
+        state = context.user_data.get("new")
+        if not state or not state.get("await_text"):
+            return
+        text = " ".join((update.effective_message.text or "").split())
+        if not text or len(text) > MAX_TASK_TEXT:
+            await self.reply(update, f"הטקסט צריך להיות עד {MAX_TASK_TEXT} תווים. נסו שוב.")
+            return
+        kid = next((k for k in self.store.kids() if k.id == state["kid"]), None)
+        context.user_data.pop("new", None)
+        if not kid:
+            await self.reply(update, "הילד לא נמצא — התחילו מחדש (📋 משימות)")
+            return
+        if "weekdays" in state:
+            rec = await self.service.add_recurring(kid, text, frozenset(state["weekdays"]))
+            await self.reply(update, f"🔁 נוספה משימה קבועה: {e(rec.text)}\n"
+                                     f"{e(kid.first_name)} · {repeat_label(rec.weekdays)}")
+            return
+        due = dt.date.fromisoformat(state["due"])
+        task = await self.service.add_manual(kid, text, due)
+        await self.reply(update, f"➕ נוסף: {e(task.text)} ({e(kid.first_name)}, ל-{due:%d/%m})", [done_button(task)])
+
+    async def _recurring_action(self, query: CallbackQuery, op: str) -> None:
+        """🔁 list of recurring tasks, each with a delete button (already created tasks stay)."""
+        btn = InlineKeyboardButton
+        name, _, value = op.partition("=")
+        if name == "del" and value.isdigit():
+            await query.answer("🗑 נמחקה" if self.store.delete_recurring(int(value)) else "כבר נמחקה")
+        elif name == "close":
+            await query.answer()
+            await query.message.delete()
+            return
+        elif name != "list":
+            await query.answer("הכפתור הזה כבר לא פעיל")
+            return
+        else:
+            await query.answer()
+        hidden = self.store.hidden_kids(query.from_user.id)
+        recs = [r for r in self.store.recurring() if r.kid_id not in hidden]
+        controls = [btn("➕ חדשה", callback_data="add:start"), btn("✖ סגירה", callback_data="rec:close")]
+        if not recs:
+            await self._edit(query, "🔁 <b>משימות קבועות</b>\nאין משימות קבועות.", [controls])
+            return
+        lines = [f"• {e(r.kid_name.split()[0])} · {repeat_label(r.weekdays)} — {e(r.text)}" for r in recs]
+        rows = [[btn(f"🗑 {r.kid_name.split()[0]} · {short(r.text)}", callback_data=f"rec:del={r.id}")] for r in recs]
+        await self._edit(query, "🔁 <b>משימות קבועות</b>\n" + "\n".join(lines)
+                         + "\n\n🗑 מחיקה (משימות שכבר נוצרו נשארות)", rows + [controls])
 
     async def _toggle_done(self, query: CallbackQuery, task_id: int, done: bool) -> None:
         """Mark done / undo, swapping the pressed button between ✅ and ↩️."""
@@ -735,6 +848,9 @@ class Bot:
     async def job_todo_poll(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.service.push_to_todo()  # retries earlier failures
         await self._pull_from_todo(context)
+
+    async def job_recurring(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self.service.create_recurring_tasks()
 
     async def job_sync(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:

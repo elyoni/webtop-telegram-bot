@@ -35,21 +35,29 @@ Your data (db, logs) lives in the `bot-data` Docker volume. Update with `git pul
 - **Local db**: Webtop data (last, current and next week) is pulled into SQLite; all commands read
   from it, never from Webtop directly.
 - **07:00 and 15:30** (`SYNC_TIMES`): automatic Webtop update; alerts on new homework.
-- **`/sync`**: manual update, at most once per `SYNC_COOLDOWN_MINUTES` (default 30) across all users;
+- **🔄 update button**: manual update, at most once per `SYNC_COOLDOWN_MINUTES` (default 30) across all users;
   failed attempts count too (avoids hammering Webtop or locking the account on bad credentials).
 - **16:00** (Sun–Fri): today's lessons per kid — topics for context, homework with ✅ buttons,
   ➕ buttons to turn a topic into a task.
 - **20:00** (evenings before school): open tasks due by the next school day.
 - Homework becomes a task due the next school day; completing it in Telegram or in the task app syncs both ways.
 
-## Commands
+## Using the bot
 
-`/today` `/yesterday` `/tomorrow` `/week` `/date YYYY-MM-DD` `/todo` `/add <kid> <text> [YYYY-MM-DD]` `/sync` `/kids` `/config` `/help`
+Everything is a button; only `/start`, `/help` and `/config` are commands.
 
-`/config` — everyone: their own daily summary and evening reminder time (or off).
-Admins also get: users (approve / remove, make ⭐ admin), Webtop sync times and the Todoist interval (bot-wide).
-`TELEGRAM_ADMIN_IDS` are permanent admins; others can be made admins from `/config`.
-Changes apply at once and override the `.env` defaults.
+- **Bottom menu:** ⬅️ yesterday · 📅 today · ➡️ tomorrow · 🗓 week · 📋 tasks · 🔄 update.
+- **📋 Tasks:** open tasks with ✅ buttons, plus
+  - **➕ New task:** pick the kid → how often → the text.
+    *Once* (pick a date from the next 7 days), *every school day* (Sun–Fri), or *chosen weekdays*.
+    One kid per task: add it once per kid for several.
+  - **🔁 Recurring:** list of the recurring tasks, each with 🗑 delete (tasks already created stay).
+- A recurring task becomes a normal task, due that day, at 06:00 (and at bot start, if it was down).
+  It then shows in the evening reminder and syncs to Todoist like any other task.
+- `/config` — everyone: 👦 which kids to show (per user), their own daily summary and evening reminder time (or off).
+  Admins also get: users (approve / remove, make ⭐ admin), Webtop sync times and the Todoist interval (bot-wide).
+  `TELEGRAM_ADMIN_IDS` are permanent admins; others can be made admins from `/config`.
+  Changes apply at once and override the `.env` defaults.
 
 ## Setup
 
@@ -58,7 +66,7 @@ Changes apply at once and override the `.env` defaults.
 3. Other users send `/start`; admins get an access request with ✅ approve / ✖ deny buttons.
    Allowed users are stored in the db and all share the same Webtop account.
    Only admins and allowed users get answers or alerts.
-4. To-do list: works in Telegram out of the box (`/todo`, `/add`, ✅ buttons), no extra setup.
+4. To-do list: works in Telegram out of the box (📋 tasks, ➕, ✅ buttons), no extra setup.
    Tasks live in the bot's SQLite db. Optional: mirror them to Todoist (below).
 
    | | Telegram only (default) | + Todoist (optional) |
@@ -66,7 +74,7 @@ Changes apply at once and override the `.env` defaults.
    | Setup | none | one API token |
    | Cost | free | free plan is enough (5 projects) |
    | Family sharing | via the bot chat | share the project from the Todoist app |
-   | Add / tick tasks | `/add`, ✅ buttons | also in the Todoist app; bot picks them up |
+   | Add / tick tasks | ➕ button, ✅ buttons | also in the Todoist app; bot picks them up |
    | Why Todoist | | token from Settings, no app registration; sections per kid; shared projects |
 
    Todoist setup: Todoist → Settings → Integrations → Developer → copy the API token into `TODOIST_TOKEN`.

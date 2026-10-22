@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Protocol, Tuple
 
 from .config import Config
 from .homework import Kid, Lesson, fetch_all, is_school_day, next_school_day, week_start
-from .store import Store, Task
+from .store import Recurring, Store, Task
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +237,16 @@ class Service:
                 except Exception as e:
                     logger.warning("Task app status update failed: %s", e)
         return task
+
+    async def add_recurring(self, kid: Kid, text: str, weekdays: frozenset[int]) -> Recurring:
+        rec = self.store.add_recurring(kid.id, text, weekdays)
+        await self.create_recurring_tasks()  # today's task right away, if today is one of its days
+        return rec
+
+    async def create_recurring_tasks(self) -> None:
+        """Create today's tasks of the recurring ones and push them to the task app."""
+        if self.store.materialize_recurring(self.cfg.today()):
+            await self.push_to_todo()
 
     async def add_manual(self, kid: Kid, text: str, due: dt.date) -> Task:
         task, _ = self.store.add_task(kid.id, self.cfg.today(), due, "", text, source="manual", notified=True)

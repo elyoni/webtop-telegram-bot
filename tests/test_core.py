@@ -218,3 +218,135 @@ class TestSettings:
 
         # Assert
         assert list(settings.pending_users()) == list(range(5, MAX_PENDING + 5))
+
+
+class TestRecurring:
+    MONDAY = dt.date(2026, 10, 19)  # weekday() == 0
+    TUESDAY = dt.date(2026, 10, 20)
+
+    def test_weeklyOnMonday_materializeMondayAndTuesday_createsOnlyMonday(self, store: Store) -> None:
+        # Arrange
+        store.add_recurring(KID.id, "violin", frozenset({0}))
+
+        # Act
+        monday = store.materialize_recurring(self.MONDAY)
+        tuesday = store.materialize_recurring(self.TUESDAY)
+
+        # Assert
+        assert [(t.text, t.due_date, t.source) for t in monday] == [("violin", self.MONDAY, "recurring")]
+        assert tuesday == []
+
+    def test_sameDay_materializeTwice_createsOnce(self, store: Store) -> None:
+        # Arrange
+        store.add_recurring(KID.id, "violin", frozenset({0}))
+        store.materialize_recurring(self.MONDAY)
+
+        # Act
+        again = store.materialize_recurring(self.MONDAY)
+
+        # Assert
+        assert again == []
+        assert len(store.open_tasks()) == 1
+
+    def test_deletedRecurring_materialize_createsNothing(self, store: Store) -> None:
+        # Arrange
+        rec = store.add_recurring(KID.id, "violin", frozenset({0}))
+        store.delete_recurring(rec.id)
+
+        # Act / Assert
+        assert store.materialize_recurring(self.MONDAY) == []
+
+    def test_doneTask_nextWeek_createsNewOpenTask(self, store: Store) -> None:
+        # Arrange
+        store.add_recurring(KID.id, "violin", frozenset({0}))
+        store.set_completed(store.materialize_recurring(self.MONDAY)[0].id)
+
+        # Act
+        store.materialize_recurring(self.MONDAY + dt.timedelta(days=7))
+
+        # Assert
+        assert [t.due_date for t in store.open_tasks()] == [self.MONDAY + dt.timedelta(days=7)]
+
+
+class TestAddTaskFlow:
+    @staticmethod
+    def make_bot(store: Store):
+        from webtop_bot.bot import Bot
+
+        bot = Bot.__new__(Bot)
+        bot.store = store
+        bot.cfg = SimpleNamespace(today=lambda: DAY)
+        return bot
+
+    @staticmethod
+    def query():
+        edits = []
+
+        async def edit_message_text(text, reply_markup=None):
+            edits.append((text, reply_markup))
+
+        async def answer(text=None, **_):
+            edits.append(("answer", text))
+
+        return SimpleNamespace(
+            from_user=SimpleNamespace(id=1), edit_message_text=edit_message_text, answer=answer, edits=edits
+        )
+
+    def run(self, bot, ctx, query, op: str) -> None:
+        import asyncio
+
+        asyncio.run(bot._add_action(query, ctx, op))
+
+    def test_oneKid_start_skipsKidPickerAndAsksRepeat(self, store: Store) -> None:
+        # Arrange
+        bot, ctx, query = self.make_bot(store), SimpleNamespace(user_data={}), self.query()
+
+        # Act
+        self.run(bot, ctx, query, "start")
+
+        # Assert
+        assert ctx.user_data["new"]["kid"] == KID.id
+        assert "כל כמה זמן" in query.edits[-1][0]
+
+    def test_weekly_toggleDays_storesChosenWeekdays(self, store: Store) -> None:
+        # Arrange
+        bot, ctx, query = self.make_bot(store), SimpleNamespace(user_data={}), self.query()
+        for op in ("start", "mode=weekly", "day=6", "day=2", "day=2", "day=0"):
+            self.run(bot, ctx, query, op)
+
+        # Act
+        self.run(bot, ctx, query, "days_done")
+
+        # Assert
+        assert ctx.user_data["new"]["weekdays"] == [0, 6]
+        assert ctx.user_data["new"]["await_text"] is True
+
+    def test_noState_modeButton_asksToRestart(self, store: Store) -> None:
+        # Arrange
+        bot, ctx, query = self.make_bot(store), SimpleNamespace(user_data={}), self.query()
+
+        # Act
+        self.run(bot, ctx, query, "mode=daily")
+
+        # Assert
+        assert "פג תוקף" in query.edits[-1][1]
+
+    def test_dueOutsideChoices_due_isRejected(self, store: Store) -> None:
+        # Arrange
+        bot, ctx, query = self.make_bot(store), SimpleNamespace(user_data={}), self.query()
+        for op in ("start", "mode=once"):
+            self.run(bot, ctx, query, op)
+
+        # Act
+        self.run(bot, ctx, query, "due=2030-01-01")
+
+        # Assert
+        assert "await_text" not in ctx.user_data["new"]
+
+
+def test_repeatLabel_variousDays_readable() -> None:
+    from webtop_bot.bot import SCHOOL_WEEKDAYS, repeat_label
+
+    assert repeat_label(SCHOOL_WEEKDAYS) == "כל יום לימודים"
+    assert repeat_label(range(7)) == "כל יום"
+    assert repeat_label({1, 6}) == "בימים א׳, ג׳"

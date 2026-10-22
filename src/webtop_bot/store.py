@@ -66,7 +66,14 @@ CREATE TABLE IF NOT EXISTS users (
     added_by INTEGER,
     added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE TABLE IF NOT EXISTS hidden_kids (  -- kids a Telegram user chose not to see (see /kids)
+CREATE TABLE IF NOT EXISTS recurring_tasks (  -- manual tasks that repeat on fixed weekdays
+    id INTEGER PRIMARY KEY,
+    kid_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    weekdays TEXT NOT NULL,            -- comma separated date.weekday() numbers, Monday = 0
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS hidden_kids (  -- kids a Telegram user chose not to see (see /config)
     user_id INTEGER NOT NULL,
     kid_id TEXT NOT NULL,
     PRIMARY KEY (user_id, kid_id)
@@ -101,6 +108,15 @@ def utc_now() -> str:
 
 def slot_key(kid_id: str, date: dt.date, slot: str) -> str:
     return hashlib.sha1(f"{kid_id}|{date}|{slot}|homework".encode()).hexdigest()
+
+
+@dataclass
+class Recurring:
+    id: int
+    kid_id: str
+    kid_name: str
+    text: str
+    weekdays: frozenset[int]  # date.weekday(), Monday = 0
 
 
 @dataclass
@@ -431,6 +447,45 @@ class Store:
             "UPDATE tasks SET todo_list_id = ?, todo_task_id = ? WHERE id = ?", (list_id, todo_task_id, task_id)
         )
         self._db.commit()
+
+    # recurring tasks
+
+    def add_recurring(self, kid_id: str, text: str, weekdays: frozenset[int]) -> Recurring:
+        cur = self._db.execute(
+            "INSERT INTO recurring_tasks (kid_id, text, weekdays) VALUES (?, ?, ?)",
+            (kid_id, text, ",".join(str(d) for d in sorted(weekdays))),
+        )
+        self._db.commit()
+        return next(r for r in self.recurring() if r.id == cur.lastrowid)
+
+    def recurring(self) -> List[Recurring]:
+        rows = self._db.execute(
+            "SELECT r.id, r.kid_id, k.name, r.text, r.weekdays FROM recurring_tasks r "
+            "JOIN kids k ON k.id = r.kid_id ORDER BY k.name, r.id"
+        )
+        return [Recurring(r[0], r[1], r[2], r[3], frozenset(int(d) for d in r[4].split(","))) for r in rows]
+
+    def delete_recurring(self, recurring_id: int) -> bool:
+        cur = self._db.execute("DELETE FROM recurring_tasks WHERE id = ?", (recurring_id,))
+        self._db.commit()
+        return cur.rowcount == 1
+
+    def materialize_recurring(self, day: dt.date) -> List[Task]:
+        """Create `day`'s task of every recurring task scheduled for that weekday (once per day).
+        Returns the new tasks."""
+        created = []
+        for rec in self.recurring():
+            if day.weekday() not in rec.weekdays:
+                continue
+            cur = self._db.execute(
+                "INSERT OR IGNORE INTO tasks (key, kid_id, lesson_date, due_date, subject, text, source, notified) "
+                "VALUES (?, ?, ?, ?, '', ?, 'recurring', 1)",
+                (f"rec:{rec.id}:{day}", rec.kid_id, day.isoformat(), day.isoformat(), rec.text),
+            )
+            if cur.rowcount == 1:
+                created.append(self.task(cur.lastrowid))
+        self._db.commit()
+        return created
 
     # users allowed besides the admins
     def users(self) -> List[tuple[int, str]]:
