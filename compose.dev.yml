@@ -1,0 +1,11 @@
+# Dev override: run the image with the working-tree code, no rebuild per change.
+#   task dev        (= docker compose -p webtop-bot-dev -f compose.yml -f compose.dev.yml up)
+# The package is installed editable in the image, so mounting ./src replaces the baked-in code.
+# Uses ./data (same db/log as `task start`), as your own user so the files stay yours.
+services:
+  bot:
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./src:/app/src:ro
+      - ./data:/data
+    restart: "no"

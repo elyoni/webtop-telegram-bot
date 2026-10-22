@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /
 ENV UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1 PYTHONUNBUFFERED=1 DATA_DIR=/data
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
+# Dependencies first: a code-only change reuses this layer.
+RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 RUN uv sync --frozen --no-dev
 

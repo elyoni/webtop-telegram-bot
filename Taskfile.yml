@@ -101,6 +101,20 @@ tasks:
     cmds:
       - docker compose down
 
+  dev:
+    desc: Run in Docker with the working-tree code mounted (no rebuild per change; Ctrl+C to stop)
+    deps: [stop]  # one token, one bot
+    env:
+      UID: {sh: id -u}
+      GID: {sh: id -g}
+    cmds:
+      - docker compose -p webtop-bot-dev -f compose.yml -f compose.dev.yml up {{.CLI_ARGS}}
+
+  dev-down:
+    desc: Stop the dev container (after `task dev -- -d`)
+    cmds:
+      - docker compose -p webtop-bot-dev -f compose.yml -f compose.dev.yml down
+
   # --- release (CI publishes elyoni/webtop-bot:<version> on a vX.Y.Z tag) -------
 
   release:
