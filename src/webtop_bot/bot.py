@@ -60,21 +60,26 @@ NEXT_KIND = {"good": "bad", "bad": "neutral", "neutral": "good"}
 FLOWS = ("new", "act", "rem")  # user_data keys of the multi-step "add" flows; one at a time
 DUE_CHOICES = 7  # days offered for a one-time task
 
-# Persistent keyboard: button text -> command name.
+# Persistent keyboard: button text -> command name. The rest is under ☰ עוד (see MORE_BUTTONS).
 MENU_BUTTONS = {
-    "⬅️ אתמול": "yesterday",
     "📅 היום": "today",
     "➡️ מחר": "tomorrow",
-    "🗓 השבוע": "week",
     "📋 משימות": "todo",
-    "🔄 עדכון": "sync",
-    "🎒 חוגים": "activities",
+    "☰ עוד": "more",
 }
-MENU = ReplyKeyboardMarkup(
-    [["⬅️ אתמול", "📅 היום", "➡️ מחר"], ["🗓 השבוע", "📋 משימות"], ["🎒 חוגים", "🔄 עדכון"]],
-    resize_keyboard=True,
-    is_persistent=True,
-)
+# Buttons of the earlier keyboard: still answered, so a keyboard not yet refreshed by /start keeps working.
+LEGACY_MENU_BUTTONS = {
+    "⬅️ אתמול": "yesterday",
+    "🗓 השבוע": "week",
+    "🎒 חוגים": "activities",
+    "🔄 עדכון": "sync",
+}
+MENU = ReplyKeyboardMarkup([list(MENU_BUTTONS)], resize_keyboard=True, is_persistent=True)
+MORE_BUTTONS = [  # ☰ עוד: (label, command name)
+    [("⬅️ אתמול", "yesterday"), ("🗓 השבוע", "week")],
+    [("🎒 חוגים ותזכורות", "activities")],
+    [("🔄 עדכון מ-Webtop", "sync"), ("⚙️ הגדרות", "config")],
+]
 
 Buttons = List[InlineKeyboardButton]
 Handler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
@@ -173,9 +178,11 @@ class Bot:
             "todo": self.cmd_todo,
             "sync": self.cmd_sync,
             "activities": self.cmd_activities,
+            "more": self.cmd_more,
+            "config": self.cmd_config,
         }
         app.add_handler(CommandHandler("config", self._guard(self.cmd_config)))
-        app.add_handler(MessageHandler(filters.Text(list(MENU_BUTTONS)), self._guard(self.on_menu)))
+        app.add_handler(MessageHandler(filters.Text([*MENU_BUTTONS, *LEGACY_MENU_BUTTONS]), self._guard(self.on_menu)))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._guard(self.on_text)))
         app.add_handler(CallbackQueryHandler(self._guard(self.on_button)))
         app.add_error_handler(self.on_error)
@@ -225,7 +232,14 @@ class Bot:
         context.args = []
         for flow in FLOWS:  # leaving a half-finished "add"
             context.user_data.pop(flow, None)
-        await self.commands[MENU_BUTTONS[update.effective_message.text]](update, context)
+        text = update.effective_message.text
+        await self.commands[MENU_BUTTONS.get(text) or LEGACY_MENU_BUTTONS[text]](update, context)
+
+    async def cmd_more(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        rows = [[InlineKeyboardButton(label, callback_data=f"more:{name}") for label, name in row]
+                for row in MORE_BUTTONS]
+        rows.append([InlineKeyboardButton("✖ סגירה", callback_data="more:close")])
+        await update.effective_message.reply_text("☰ <b>עוד</b>", reply_markup=InlineKeyboardMarkup(rows))
 
     def _guard(self, handler: Handler) -> Handler:
         @functools.wraps(handler)
@@ -398,9 +412,9 @@ class Bot:
         text = (
             "📚 <b>בוט שיעורי בית</b>\n\n"
             "<b>כפתורים</b>\n"
-            "📅 היום · ⬅️ אתמול · ➡️ מחר · 🗓 השבוע — שיעורים ושיעורי בית\n"
+            "📅 היום · ➡️ מחר — שיעורים ושיעורי בית\n"
             "📋 משימות — משימות פתוחות, ➕ משימה חדשה (חד פעמית או קבועה), 🔁 קבועות\n"
-            "🔄 עדכון — עדכון מ-Webtop (פעם ב-30 דק׳)\n"
+            "☰ עוד — ⬅️ אתמול, 🗓 השבוע, 🎒 חוגים ותזכורות, 🔄 עדכון (פעם ב-30 דק׳), ⚙️ הגדרות\n"
             "✅ סימון משימה כבוצעה (↩️ ביטול)\n\n"
             "<b>סימנים</b>\n"
             "✅ משימה בוצעה\n"
@@ -435,7 +449,7 @@ class Bot:
 
     def freshness(self) -> str:
         last = self.service.last_sync()
-        return f"🕒 עודכן {last:%d/%m %H:%M}" if last else "🕒 טרם עודכן — 🔄 עדכון"
+        return f"🕒 עודכן {last:%d/%m %H:%M}" if last else "🕒 טרם עודכן — ☰ עוד ← 🔄 עדכון"
 
     async def _show(self, update: Update, days: List[dt.date]) -> None:
         stored = set(self.service.stored_days())
@@ -536,7 +550,7 @@ class Bot:
             rows = [[btn(f"{'⬜' if k.id in hidden else '✅'} {k.first_name} ({k.class_label})",
                          callback_data=f"cfg:kid={kid_token(k)}")] for k in kids]
             text = "👦 <b>אילו ילדים להציג?</b> (לכל משתמש בנפרד; לחיצה מחליפה)"
-            return (text if kids else "אין נתונים עדיין — לחצו 🔄 עדכון"), InlineKeyboardMarkup(rows + [back])
+            return (text if kids else "אין נתונים עדיין — ☰ עוד ← 🔄 עדכון"), InlineKeyboardMarkup(rows + [back])
         if screen in ("digest_time", "reminder_time"):
             title = {"digest_time": "📚 <b>הסיכום היומי שלך</b> (א׳–ו׳)",
                      "reminder_time": "⏰ <b>תזכורת הערב שלך</b> (משימות פתוחות למחר)"}[screen]
@@ -693,6 +707,9 @@ class Bot:
             return
         if action == "add":
             await self._add_action(query, context, raw_id)
+            return
+        if action == "more":
+            await self._more_action(update, context, raw_id)
             return
         if action == "act":
             await self._activity_action(query, context, raw_id)
@@ -911,7 +928,7 @@ class Bot:
             state["kid"] = kids[0].id
             name = "kid"
         if not state or (name != "kid" and "kid" not in state):
-            await query.answer("פג תוקף — התחילו מחדש (🎒 חוגים)")
+            await query.answer("פג תוקף — התחילו מחדש (☰ עוד ← 🎒 חוגים)")
             return
         if name == "kid" and value:
             kid = self._kid_by_token(value)
@@ -996,7 +1013,7 @@ class Bot:
         context.user_data.pop("act", None)
         kid = next((k for k in self.store.kids() if k.id == state["kid"]), None)
         if not kid:
-            await self.reply(update, "הילד לא נמצא — התחילו מחדש (🎒 חוגים)")
+            await self.reply(update, "הילד לא נמצא — התחילו מחדש (☰ עוד ← 🎒 חוגים)")
             return
         weekdays = frozenset(state.get("weekdays", []))
         on_date = dt.date.fromisoformat(state["on_date"]) if state.get("on_date") else None
@@ -1035,7 +1052,7 @@ class Bot:
             name, value = "kid", "all"
         state = context.user_data.get("rem")
         if state is None or name != "kid":
-            await query.answer("פג תוקף — התחילו מחדש (🎒 חוגים)")
+            await query.answer("פג תוקף — התחילו מחדש (☰ עוד ← 🎒 חוגים)")
             return
         if value == "all":
             state["kid"] = ""
@@ -1089,6 +1106,18 @@ class Bot:
         rows = [[btn(f"🗑 {r.kid_name.split()[0]} · {short(r.text)}", callback_data=f"rec:del={r.id}")] for r in recs]
         await self._edit(query, "🔁 <b>משימות קבועות</b>\n" + "\n".join(lines)
                          + "\n\n🗑 מחיקה (משימות שכבר נוצרו נשארות)", rows + [controls])
+
+    async def _more_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE, name: str) -> None:
+        """A ☰ עוד button: run that command (its answer comes as a new message)."""
+        query = update.callback_query
+        await query.answer()
+        if name == "close":
+            await query.message.delete()
+        elif name in {n for row in MORE_BUTTONS for _, n in row}:
+            context.args = []
+            for flow in FLOWS:
+                context.user_data.pop(flow, None)
+            await self.commands[name](update, context)
 
     async def _toggle_done(self, query: CallbackQuery, task_id: int, done: bool) -> None:
         """Mark done / undo, swapping the pressed button between ✅ and ↩️."""

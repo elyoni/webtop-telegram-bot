@@ -35,7 +35,7 @@ Your data (db, logs) lives in the `bot-data` Docker volume. Update with `git pul
 - **Local db**: Webtop data (last, current and next week) is pulled into SQLite; all commands read
   from it, never from Webtop directly.
 - **07:00 and 15:30** (`SYNC_TIMES`): automatic Webtop update; alerts on new homework.
-- **🔄 update button**: manual update, at most once per `SYNC_COOLDOWN_MINUTES` (default 30) across all users;
+- **🔄 update button** (☰ more): manual update, at most once per `SYNC_COOLDOWN_MINUTES` (default 30) across all users;
   failed attempts count too (avoids hammering Webtop or locking the account on bad credentials).
 - **16:00** (Sun–Fri): today's lessons per kid — topics for context, homework with ✅ buttons,
   ➕ buttons to turn a topic into a task.
@@ -46,7 +46,8 @@ Your data (db, logs) lives in the `bot-data` Docker volume. Update with `git pul
 
 Everything is a button; only `/start`, `/help` and `/config` are commands.
 
-- **Bottom menu:** ⬅️ yesterday · 📅 today · ➡️ tomorrow · 🗓 week · 📋 tasks · 🎒 activities · 🔄 update.
+- **Bottom menu:** 📅 today · ➡️ tomorrow · 📋 tasks · ☰ more.
+- **☰ More:** ⬅️ yesterday · 🗓 week · 🎒 activities and reminders · 🔄 update from Webtop · ⚙️ settings.
 - **📋 Tasks:** open tasks with ✅ buttons, plus
   - **➕ New task:** pick the kid → how often → the text.
     *Once* (pick a date from the next 7 days), *every school day* (Sun–Fri), or *chosen weekdays*.
@@ -54,7 +55,7 @@ Everything is a button; only `/start`, `/help` and `/config` are commands.
   - **🔁 Recurring:** list of the recurring tasks, each with 🗑 delete (tasks already created stay).
 - A recurring task becomes a normal task, due that day, at 06:00 (and at bot start, if it was down).
   It then shows in the evening reminder and syncs to Todoist like any other task.
-- **🎒 Activities:** after-school activities and reminders, for any allowed user.
+- **🎒 Activities** (☰ more): after-school activities and reminders, for any allowed user.
   - **➕ Activity:** kid → *weekly* (chosen weekdays, e.g. חוג) or *one date* (birthday, trip; pick one of the
     next 7 days or type `DD/MM`) → name (put the hour in the name, e.g. `כדורגל 16:00`).
     Shown under that day's lessons in today / tomorrow / week and the daily summary. One-time ones disappear after their date.

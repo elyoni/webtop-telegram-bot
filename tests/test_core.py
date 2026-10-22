@@ -453,3 +453,25 @@ class TestEventKinds:
         ev = Event(1, KID.id, DAY, "מילה טובה", True, "", "", 1, "")
         assert event_kind(ev, {}) == "neutral"
         assert event_kind(ev, {"מילה טובה": "good"}) == "good"
+
+
+class TestMoreMenu:
+    def test_everyMenuAndMoreButton_hasAHandler(self, tmp_path: Path, monkeypatch) -> None:
+        # Arrange
+        for name, value in (("WEBTOP_USERNAME", "u"), ("WEBTOP_PASSWORD", "p"), ("TELEGRAM_BOT_TOKEN", "1:abc"),
+                            ("DATA_DIR", str(tmp_path))):
+            monkeypatch.setenv(name, value)
+        from webtop_bot.bot import LEGACY_MENU_BUTTONS, MENU_BUTTONS, MORE_BUTTONS, Bot
+        from webtop_bot.config import Config
+        from webtop_bot.service import Service
+
+        cfg = Config.from_env()
+        store = Store(tmp_path / "bot.db")
+        bot = Bot(cfg, Service(cfg, store, None))
+
+        # Act
+        bot.build()
+
+        # Assert
+        names = {*MENU_BUTTONS.values(), *LEGACY_MENU_BUTTONS.values(), *(n for row in MORE_BUTTONS for _, n in row)}
+        assert names <= set(bot.commands)
