@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Protocol, Tuple
 
 from .config import Config
@@ -45,6 +46,14 @@ class TaskBackend(Protocol):
     async def update_task(self, list_id: str, task_id: str, title: str, body: str) -> None: ...
 
 
+@dataclass(frozen=True)
+class Reminder:
+    kid_id: str
+    kid_name: str
+    matched: str  # the lesson / activity name that matched
+    note: str
+
+
 class SyncBusy(Exception):
     """A Webtop update is already running."""
 
@@ -69,6 +78,25 @@ class Service:
 
     def view(self, days: List[dt.date]) -> KidLessons:
         return [(kid, self.store.lessons(kid, days)) for kid in self.store.kids()]
+
+    def reminders_for(self, day: dt.date) -> List[Reminder]:
+        """Reminder rules matching a lesson or activity of `day` (the caller asks the evening before)."""
+        rules = self.store.reminder_rules()
+        if not rules:
+            return []
+        activities = self.store.activities_on(day)
+        found: List[Reminder] = []
+        for kid in self.store.kids():
+            names = {l.subject for l in self.store.lessons(kid, [day])}
+            names |= {a.title for a in activities if a.kid_id == kid.id}
+            for rule in rules:
+                if rule.kid_id not in (None, kid.id):
+                    continue
+                for name in sorted(names):
+                    if rule.match.casefold() in name.casefold():
+                        found.append(Reminder(kid.id, kid.name, name, rule.note))
+                        break
+        return found
 
     def stored_days(self) -> List[dt.date]:
         """Days covered by the latest Webtop update."""

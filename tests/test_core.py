@@ -350,3 +350,106 @@ def test_repeatLabel_variousDays_readable() -> None:
     assert repeat_label(SCHOOL_WEEKDAYS) == "כל יום לימודים"
     assert repeat_label(range(7)) == "כל יום"
     assert repeat_label({1, 6}) == "בימים א׳, ג׳"
+
+
+class TestActivities:
+    MONDAY = dt.date(2026, 10, 19)
+
+    def test_weeklyAndOneTime_activitiesOn_matchTheirDays(self, store: Store) -> None:
+        # Arrange
+        store.add_activity(KID.id, "football", frozenset({0}), None)
+        store.add_activity(KID.id, "birthday", frozenset(), dt.date(2026, 10, 20))
+
+        # Act / Assert
+        assert [a.title for a in store.activities_on(self.MONDAY)] == ["football"]
+        assert [a.title for a in store.activities_on(dt.date(2026, 10, 20))] == ["birthday"]
+        assert store.activities_on(dt.date(2026, 10, 21)) == []
+
+    def test_pastOneTime_purge_keepsWeeklyAndFuture(self, store: Store) -> None:
+        # Arrange
+        store.add_activity(KID.id, "old", frozenset(), dt.date(2026, 10, 1))
+        store.add_activity(KID.id, "soon", frozenset(), dt.date(2026, 10, 25))
+        store.add_activity(KID.id, "football", frozenset({0}), None)
+
+        # Act
+        store.purge_activities_before(self.MONDAY)
+
+        # Assert
+        assert sorted(a.title for a in store.activities(self.MONDAY)) == ["football", "soon"]
+
+
+class TestReminders:
+    def reminders(self, store: Store, day: dt.date):
+        from webtop_bot.service import Service
+
+        return Service(SimpleNamespace(), store, None).reminders_for(day)
+
+    def test_lessonMatchesRule_remindersFor_returnsNote(self, store: Store) -> None:
+        # Arrange
+        store.replace_lessons(KID, [DAY], [Lesson(KID, DAY, 1, "חנג", "T", "", "", 0, 7)])
+        store.add_reminder_rule(None, "חנג", "להביא נעליים")
+
+        # Act
+        found = self.reminders(store, DAY)
+
+        # Assert
+        assert [(r.kid_id, r.matched, r.note) for r in found] == [(KID.id, "חנג", "להביא נעליים")]
+
+    def test_activityMatchesRule_remindersFor_returnsNote(self, store: Store) -> None:
+        # Arrange
+        store.add_activity(KID.id, "כדורגל 16:00", frozenset({DAY.weekday()}), None)
+        store.add_reminder_rule(KID.id, "כדורגל", "בקבוק מים")
+
+        # Act / Assert
+        assert [r.note for r in self.reminders(store, DAY)] == ["בקבוק מים"]
+
+    def test_ruleForOtherKid_remindersFor_isSkipped(self, store: Store) -> None:
+        # Arrange
+        store.replace_lessons(KID, [DAY], [Lesson(KID, DAY, 1, "חנג", "T", "", "", 0, 7)])
+        store.add_reminder_rule("name:Other", "חנג", "להביא נעליים")
+
+        # Act / Assert
+        assert self.reminders(store, DAY) == []
+
+    def test_noMatchingLesson_remindersFor_isEmpty(self, store: Store) -> None:
+        # Arrange
+        store.replace_lessons(KID, [DAY], [Lesson(KID, DAY, 1, "מתמטיקה", "T", "", "", 0, 7)])
+        store.add_reminder_rule(None, "חנג", "להביא נעליים")
+
+        # Act / Assert
+        assert self.reminders(store, DAY) == []
+
+
+class TestEventKinds:
+    def add(self, store: Store, type_: str, positive: bool, event_id: int) -> None:
+        store.add_events(KID.id, [Event(event_id, KID.id, DAY, type_, positive, "", "", 1, "")])
+
+    def test_unchosenTypes_eventTypes_praiseIsGoodOthersNeutral(self, store: Store) -> None:
+        # Arrange
+        self.add(store, "מילה טובה", True, 1)
+        self.add(store, "איחור", False, 2)
+
+        # Act / Assert
+        assert store.event_types() == [("איחור", "neutral"), ("מילה טובה", "good")]
+
+    def test_chosenKind_eventTypes_overridesDefault(self, store: Store) -> None:
+        # Arrange
+        self.add(store, "איחור", False, 2)
+
+        # Act
+        store.set_event_kind("איחור", "bad")
+
+        # Assert
+        assert store.event_types() == [("איחור", "bad")]
+        assert store.event_kinds() == {"איחור": "bad"}
+
+    def test_unknownKind_setEventKind_raises(self, store: Store) -> None:
+        with pytest.raises(ValueError):
+            store.set_event_kind("איחור", "awful")
+
+    def test_eventKind_choiceBeatsWebtopFlag(self) -> None:
+        from webtop_bot.bot import event_kind
+
+        ev = Event(1, KID.id, DAY, "מילה טובה", True, "", "", 1, "")
+        assert event_kind(ev, {}) == "good"
+        assert event_kind(ev, {"מילה טובה": "neutral"}) == "neutral"

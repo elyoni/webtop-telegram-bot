@@ -46,7 +46,7 @@ Your data (db, logs) lives in the `bot-data` Docker volume. Update with `git pul
 
 Everything is a button; only `/start`, `/help` and `/config` are commands.
 
-- **Bottom menu:** ⬅️ yesterday · 📅 today · ➡️ tomorrow · 🗓 week · 📋 tasks · 🔄 update.
+- **Bottom menu:** ⬅️ yesterday · 📅 today · ➡️ tomorrow · 🗓 week · 📋 tasks · 🎒 activities · 🔄 update.
 - **📋 Tasks:** open tasks with ✅ buttons, plus
   - **➕ New task:** pick the kid → how often → the text.
     *Once* (pick a date from the next 7 days), *every school day* (Sun–Fri), or *chosen weekdays*.
@@ -54,6 +54,15 @@ Everything is a button; only `/start`, `/help` and `/config` are commands.
   - **🔁 Recurring:** list of the recurring tasks, each with 🗑 delete (tasks already created stay).
 - A recurring task becomes a normal task, due that day, at 06:00 (and at bot start, if it was down).
   It then shows in the evening reminder and syncs to Todoist like any other task.
+- **🎒 Activities:** after-school activities and reminders, for any allowed user.
+  - **➕ Activity:** kid → *weekly* (chosen weekdays, e.g. חוג) or *one date* (birthday, trip; pick one of the
+    next 7 days or type `DD/MM`) → name (put the hour in the name, e.g. `כדורגל 16:00`).
+    Shown under that day's lessons in today / tomorrow / week and the daily summary. One-time ones disappear after their date.
+  - **🔔 Reminder:** kid (or all) → text to find in a lesson or activity name (e.g. `חנג`) → note (e.g. `להביא נעליים`).
+    The evening before a matching lesson or activity (evening reminder, and ➡️ tomorrow) the bot adds
+    "🔔 Yoav · חנג — להביא נעליים". 🗑 deletes either.
+- **Teacher notes** are 🌟 good, ⚠️ bad or ⚪ neutral. Webtop's types differ per school, so admins choose in
+  `/config` → 🏷 teacher-note types (tap to cycle). New types start neutral, except Webtop's own praise type (good).
 - `/config` — everyone: 👦 which kids to show (per user), their own daily summary and evening reminder time (or off).
   Admins also get: users (approve / remove, make ⭐ admin), Webtop sync times and the Todoist interval (bot-wide).
   `TELEGRAM_ADMIN_IDS` are permanent admins; others can be made admins from `/config`.

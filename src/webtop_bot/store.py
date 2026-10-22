@@ -73,6 +73,25 @@ CREATE TABLE IF NOT EXISTS recurring_tasks (  -- manual tasks that repeat on fix
     weekdays TEXT NOT NULL,            -- comma separated date.weekday() numbers, Monday = 0
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS activities (   -- after-school activities: weekly (חוג) or on one date (יום הולדת)
+    id INTEGER PRIMARY KEY,
+    kid_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    weekdays TEXT NOT NULL DEFAULT '',  -- date.weekday() numbers, Monday = 0; empty for a one-time one
+    on_date TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS reminder_rules (  -- "the day before a lesson/activity matching X, remind Y"
+    id INTEGER PRIMARY KEY,
+    kid_id TEXT,                         -- NULL: every kid
+    match TEXT NOT NULL,
+    note TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS event_kinds (  -- good / bad / neutral per teacher-note type; types differ per school
+    type TEXT PRIMARY KEY,
+    kind TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS hidden_kids (  -- kids a Telegram user chose not to see (see /config)
     user_id INTEGER NOT NULL,
     kid_id TEXT NOT NULL,
@@ -117,6 +136,28 @@ class Recurring:
     kid_name: str
     text: str
     weekdays: frozenset[int]  # date.weekday(), Monday = 0
+
+
+@dataclass
+class Activity:
+    id: int
+    kid_id: str
+    kid_name: str
+    title: str
+    weekdays: frozenset[int]  # empty for a one-time activity
+    on_date: Optional[dt.date]
+
+
+@dataclass
+class ReminderRule:
+    id: int
+    kid_id: Optional[str]  # None: every kid
+    kid_name: Optional[str]
+    match: str
+    note: str
+
+
+EVENT_KINDS = ("good", "bad", "neutral")
 
 
 @dataclass
@@ -486,6 +527,85 @@ class Store:
                 created.append(self.task(cur.lastrowid))
         self._db.commit()
         return created
+
+    # after-school activities
+
+    def add_activity(self, kid_id: str, title: str, weekdays: frozenset[int], on_date: Optional[dt.date]) -> None:
+        self._db.execute(
+            "INSERT INTO activities (kid_id, title, weekdays, on_date) VALUES (?, ?, ?, ?)",
+            (kid_id, title, ",".join(str(d) for d in sorted(weekdays)), on_date.isoformat() if on_date else None),
+        )
+        self._db.commit()
+
+    def _activities(self, where: str = "", params: tuple = ()) -> List[Activity]:
+        rows = self._db.execute(
+            "SELECT a.id, a.kid_id, k.name, a.title, a.weekdays, a.on_date FROM activities a "
+            f"JOIN kids k ON k.id = a.kid_id {where} ORDER BY k.name, a.id", params
+        )
+        return [
+            Activity(r[0], r[1], r[2], r[3], frozenset(int(d) for d in r[4].split(",") if d),
+                     dt.date.fromisoformat(r[5]) if r[5] else None)
+            for r in rows
+        ]
+
+    def activities(self, since: dt.date) -> List[Activity]:
+        """The weekly ones and the one-time ones from `since` on."""
+        return self._activities("WHERE a.on_date IS NULL OR a.on_date >= ?", (since.isoformat(),))
+
+    def activities_on(self, day: dt.date) -> List[Activity]:
+        return [a for a in self._activities() if day.weekday() in a.weekdays or a.on_date == day]
+
+    def delete_activity(self, activity_id: int) -> bool:
+        cur = self._db.execute("DELETE FROM activities WHERE id = ?", (activity_id,))
+        self._db.commit()
+        return cur.rowcount == 1
+
+    def purge_activities_before(self, day: dt.date) -> None:
+        self._db.execute("DELETE FROM activities WHERE on_date < ?", (day.isoformat(),))
+        self._db.commit()
+
+    # reminder rules
+
+    def add_reminder_rule(self, kid_id: Optional[str], match: str, note: str) -> None:
+        self._db.execute("INSERT INTO reminder_rules (kid_id, match, note) VALUES (?, ?, ?)", (kid_id, match, note))
+        self._db.commit()
+
+    def reminder_rules(self) -> List[ReminderRule]:
+        rows = self._db.execute(
+            "SELECT r.id, r.kid_id, k.name, r.match, r.note FROM reminder_rules r "
+            "LEFT JOIN kids k ON k.id = r.kid_id ORDER BY r.id"
+        )
+        return [ReminderRule(*r) for r in rows]
+
+    def delete_reminder_rule(self, rule_id: int) -> bool:
+        cur = self._db.execute("DELETE FROM reminder_rules WHERE id = ?", (rule_id,))
+        self._db.commit()
+        return cur.rowcount == 1
+
+    # teacher-note kinds
+
+    def event_types(self) -> List[tuple[str, str]]:
+        """(type, kind) for every type Webtop sent. Until chosen in /config a type is neutral,
+        except the ones Webtop itself marks as praise."""
+        rows = self._db.execute(
+            "SELECT e.type, COALESCE(k.kind, CASE WHEN MAX(e.positive) THEN 'good' ELSE 'neutral' END) "
+            "FROM events e LEFT JOIN event_kinds k ON k.type = e.type "
+            "WHERE e.type != '' GROUP BY e.type ORDER BY e.type"
+        )
+        return [(r[0], r[1]) for r in rows]
+
+    def event_kinds(self) -> Dict[str, str]:
+        """Kinds chosen in /config, by type."""
+        return {r[0]: r[1] for r in self._db.execute("SELECT type, kind FROM event_kinds")}
+
+    def set_event_kind(self, type_: str, kind: str) -> None:
+        if kind not in EVENT_KINDS:
+            raise ValueError(kind)
+        self._db.execute(
+            "INSERT INTO event_kinds (type, kind) VALUES (?, ?) ON CONFLICT(type) DO UPDATE SET kind=excluded.kind",
+            (type_, kind),
+        )
+        self._db.commit()
 
     # users allowed besides the admins
     def users(self) -> List[tuple[int, str]]:
