@@ -45,8 +45,7 @@ class Config:
     webtop_data: Optional[str]
     telegram_token: str
     admin_ids: FrozenSet[int]  # always allowed; can /allow other users (stored in the db)
-    todoist_token: Optional[str]  # takes precedence over ms_client_id
-    ms_client_id: Optional[str]
+    todoist_token: Optional[str]
     data_dir: Path
     tz: ZoneInfo
     digest_time: dt.time
@@ -68,7 +67,6 @@ class Config:
             telegram_token=required("TELEGRAM_BOT_TOKEN"),
             admin_ids=frozenset(int(c) for c in admins.replace(" ", "").split(",") if c),
             todoist_token=os.environ.get("TODOIST_TOKEN", "").strip() or None,
-            ms_client_id=os.environ.get("MS_CLIENT_ID", "").strip() or None,
             data_dir=data_dir(),
             tz=ZoneInfo(os.environ.get("BOT_TIMEZONE", "Asia/Jerusalem")),
             digest_time=_time("DIGEST_TIME", "16:00"),

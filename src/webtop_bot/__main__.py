@@ -1,4 +1,4 @@
-"""Entry point: `webtop-bot run` or `webtop-bot login-microsoft`."""
+"""Entry point: `webtop-bot run`."""
 from __future__ import annotations
 
 import argparse
@@ -12,7 +12,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("run", help="Run the bot (default)")
-    sub.add_parser("login-microsoft", help="One-time Microsoft To Do login (device code)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -21,14 +20,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     # httpx logs every request URL at INFO, and Telegram URLs contain the bot token.
     logging.getLogger("httpx").setLevel(logging.WARNING)
-
-    if args.command == "login-microsoft":
-        from .config import data_dir, required
-        from .todo import login_device_flow
-
-        user = login_device_flow(required("MS_CLIENT_ID"), data_dir())
-        print(f"Logged in as {user}")
-        return 0
 
     from .bot import Bot
     from .config import Config
@@ -43,20 +34,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 def task_backend(cfg):
-    """Todoist if TODOIST_TOKEN is set, else Microsoft To Do if MS_CLIENT_ID is set, else none."""
+    """Todoist if TODOIST_TOKEN is set, else none (tasks are kept locally only)."""
     if cfg.todoist_token:
         from .todoist import TodoistClient
 
-        if cfg.ms_client_id:
-            logging.info("Both TODOIST_TOKEN and MS_CLIENT_ID set: using Todoist")
         logging.info("Task backend: Todoist")
         return TodoistClient(cfg.todoist_token)
-    if cfg.ms_client_id:
-        from .todo import TodoClient
-
-        logging.info("Task backend: Microsoft To Do")
-        return TodoClient(cfg.ms_client_id, cfg.data_dir)
-    logging.info("No TODOIST_TOKEN or MS_CLIENT_ID: tasks are kept locally only")
+    logging.info("No TODOIST_TOKEN: tasks are kept locally only")
     return None
 
 

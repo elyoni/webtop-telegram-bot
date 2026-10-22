@@ -1,4 +1,4 @@
-"""Glue between Webtop, the local store and the task app (Todoist / Microsoft To Do)."""
+"""Glue between Webtop, the local store and the task app (Todoist)."""
 from __future__ import annotations
 
 import asyncio
@@ -29,7 +29,7 @@ def _body(task: Task) -> str:
 
 
 class TaskBackend(Protocol):
-    """A task app; implemented by todo.TodoClient and todoist.TodoistClient."""
+    """A task app; implemented by todoist.TodoistClient."""
 
     async def ensure_list(self, kid_name: str) -> str:
         """Id of the kid's task list, creating it if missing."""
