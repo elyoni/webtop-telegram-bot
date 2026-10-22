@@ -1,6 +1,6 @@
 [project]
 name = "webtop-bot"
-version = "0.3.1"
+version = "0.3.2"
 description = "Telegram bot: daily Webtop homework digests, synced to Todoist"
 readme = "README.md"
 requires-python = ">=3.10"
