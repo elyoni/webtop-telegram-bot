@@ -1,0 +1,134 @@
+# Dev / ops shortcuts. `task` lists them; https://taskfile.dev
+version: "3"
+
+dotenv: [".env"]
+
+vars:
+  VERSION:
+    sh: grep -m1 '^version' pyproject.toml | cut -d'"' -f2
+  BOT: "[.]venv/bin/webtop-bot run"  # pgrep pattern; [.] keeps pgrep from matching its own shell
+  LOG: data/bot.log
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - task --list
+
+  setup:
+    desc: Install dependencies and create .env from the example
+    cmds:
+      - uv sync
+      - mkdir -p data
+      - "[ -f .env ] || { cp .env.example .env && chmod 600 .env && echo 'Created .env — fill it in'; }"
+
+  test:
+    desc: Unit tests (no network)
+    cmds:
+      - uv run --with pytest pytest -q {{.CLI_ARGS}}
+
+  # --- local bot (runs from the source tree, logs to data/bot.log) ----------
+
+  run:
+    desc: Run the bot in the foreground (Ctrl+C to stop)
+    deps: [stop]
+    cmds:
+      - uv run webtop-bot run
+
+  start:
+    desc: Start the bot in the background
+    status:
+      - "pgrep -f '{{.BOT}}'"
+    cmds:
+      - mkdir -p data
+      - setsid -f uv run webtop-bot run >> {{.LOG}} 2>&1 < /dev/null
+      - sleep 5
+      - task: status
+
+  stop:
+    desc: Stop the background bot
+    cmds:
+      - pkill -f '{{.BOT}}' || true
+      - for i in $(seq 20); do pgrep -f '{{.BOT}}' > /dev/null || exit 0; sleep 0.5; done; echo "bot did not stop"; exit 1
+
+  restart:
+    desc: Restart the background bot
+    cmds:
+      - task: stop
+      - task: start
+
+  status:
+    desc: Is the bot running? Its last log lines
+    silent: true
+    cmds:
+      - pgrep -af '{{.BOT}}' || echo "not running"
+      - tail -n 3 {{.LOG}} 2>/dev/null || true
+
+  logs:
+    desc: Follow the bot log
+    cmds:
+      - tail -n 50 -f {{.LOG}}
+
+  backup:
+    desc: Copy the database to data/bot.db.bak-<timestamp>
+    cmds:
+      - "cp data/bot.db data/bot.db.bak-$(date +%Y%m%d-%H%M%S)"
+
+  deploy:
+    desc: Tests, clean tree check, db backup, then restart the local bot on the committed code
+    preconditions:
+      - sh: git diff --quiet HEAD
+        msg: "Uncommitted changes — commit first, the running bot must match a commit"
+    cmds:
+      - task: test
+      - task: backup
+      - task: restart
+
+  # --- Docker ----------------------------------------------------------------
+
+  build:
+    desc: Build the Docker image (webtop-bot:<version>)
+    cmds:
+      - docker build -t webtop-bot:{{.VERSION}} -t webtop-bot:latest .
+
+  up:
+    desc: Build and start with docker compose
+    cmds:
+      - docker compose up -d --build
+
+  down:
+    desc: Stop docker compose
+    cmds:
+      - docker compose down
+
+  # --- release (CI publishes elyoni/webtop-bot:<version> on a vX.Y.Z tag) -------
+
+  release:
+    desc: "Bump version, test, commit, tag — task release -- 0.4.1"
+    requires: {vars: [CLI_ARGS]}
+    preconditions:
+      - sh: git diff --quiet HEAD
+        msg: Uncommitted changes
+      - sh: '[ "$(git branch --show-current)" = main ]'
+        msg: Release from main
+      - sh: '! git rev-parse -q --verify refs/tags/v{{.CLI_ARGS}} > /dev/null'
+        msg: Tag v{{.CLI_ARGS}} already exists
+    cmds:
+      - sed -i 's/^version = ".*"/version = "{{.CLI_ARGS}}"/' pyproject.toml
+      - uv lock -q
+      - task: test
+      - git commit -qam "Release {{.CLI_ARGS}}"
+      - git tag v{{.CLI_ARGS}}
+      - echo "Tagged v{{.CLI_ARGS}} — publish with 'task publish'"
+
+  publish:
+    desc: Push main and the current version tag (triggers the Docker Hub release)
+    cmds:
+      - git push origin main v{{.VERSION}}
+      - sleep 5
+      - gh run watch --exit-status $(gh run list --branch v{{.VERSION}} -L 1 --json databaseId -q '.[0].databaseId')
+
+  ci:
+    desc: Watch the latest CI run
+    cmds:
+      - gh run watch --exit-status $(gh run list -L 1 --json databaseId -q '.[0].databaseId')

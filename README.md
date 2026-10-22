@@ -103,6 +103,13 @@ uv run webtop-bot run
 uv run --with pytest pytest -q    # unit tests (no network)
 ```
 
+### Tasks ([Taskfile](https://taskfile.dev))
+
+`task` lists them. Main ones: `task test`, `task run` (foreground), `task start|stop|restart|status|logs`
+(background, log in `data/bot.log`), `task deploy` (tests → refuses uncommitted changes → db backup → restart),
+`task build` / `task up` (Docker), `task release -- 0.4.1` (bump, test, commit, tag) then `task publish`
+(push main + tag, watch CI).
+
 ### Versions: dev vs release
 
 |                  | How to get it                                                                                                                                     |
