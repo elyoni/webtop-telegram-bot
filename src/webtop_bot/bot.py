@@ -740,7 +740,7 @@ class Bot:
         name, _, value = op.partition("=")
         user_id = query.from_user.id
         cancel = [btn("✖ ביטול", callback_data="add:cancel")]
-        state: Dict = context.user_data.get("new") or {}
+        state: Optional[Dict] = context.user_data.get("new")
         if name == "cancel":
             context.user_data.pop("new", None)
             await query.answer()
@@ -763,7 +763,7 @@ class Bot:
                 rows = [[btn(f"👦 {k.first_name}", callback_data=f"add:kid={kid_token(k)}")] for k in kids]
                 await self._edit(query, "➕ <b>משימה חדשה</b>\nלמי?", rows + [cancel])
                 return
-        if not state or (name != "kid" and "kid" not in state):
+        if state is None or (name != "kid" and "kid" not in state):
             await query.answer("פג תוקף — התחילו מחדש (📋 משימות)")
             return
         if name == "kid" and value:
@@ -910,7 +910,7 @@ class Bot:
             text, rows = self._activities_screen(user_id)
             await self._edit(query, text, rows)
             return
-        state: Dict = context.user_data.get("act") or {}
+        state: Optional[Dict] = context.user_data.get("act")
         if name == "start":
             hidden = self.store.hidden_kids(user_id)
             kids = [k for k in self.store.kids() if k.id not in hidden]
@@ -927,7 +927,7 @@ class Bot:
                 return
             state["kid"] = kids[0].id
             name = "kid"
-        if not state or (name != "kid" and "kid" not in state):
+        if state is None or (name != "kid" and "kid" not in state):
             await query.answer("פג תוקף — התחילו מחדש (☰ עוד ← 🎒 חוגים)")
             return
         if name == "kid" and value:

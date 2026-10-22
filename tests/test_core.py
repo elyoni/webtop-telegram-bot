@@ -308,6 +308,21 @@ class TestAddTaskFlow:
         assert ctx.user_data["new"]["kid"] == KID.id
         assert "כל כמה זמן" in query.edits[-1][0]
 
+    def test_twoKids_pickKid_asksRepeat(self, store: Store) -> None:
+        from webtop_bot.bot import kid_token
+
+        # Arrange
+        store.upsert_kid(Kid(id="name:Nadav", name="Nadav", class_code=2, class_number=3))
+        bot, ctx, query = self.make_bot(store), SimpleNamespace(user_data={}), self.query()
+        self.run(bot, ctx, query, "start")
+
+        # Act
+        self.run(bot, ctx, query, f"kid={kid_token(KID)}")
+
+        # Assert
+        assert ctx.user_data["new"]["kid"] == KID.id
+        assert "כל כמה זמן" in query.edits[-1][0]
+
     def test_weekly_toggleDays_storesChosenWeekdays(self, store: Store) -> None:
         # Arrange
         bot, ctx, query = self.make_bot(store), SimpleNamespace(user_data={}), self.query()
@@ -376,6 +391,28 @@ class TestActivities:
 
         # Assert
         assert sorted(a.title for a in store.activities(self.MONDAY)) == ["football", "soon"]
+
+
+class TestActivityFlow:
+    def run(self, bot, ctx, query, op: str) -> None:
+        import asyncio
+
+        asyncio.run(bot._activity_action(query, ctx, op))
+
+    def test_twoKids_pickKid_asksRepeat(self, store: Store) -> None:
+        from webtop_bot.bot import kid_token
+
+        # Arrange
+        store.upsert_kid(Kid(id="name:Nadav", name="Nadav", class_code=2, class_number=3))
+        bot, ctx, query = TestAddTaskFlow.make_bot(store), SimpleNamespace(user_data={}), TestAddTaskFlow.query()
+        self.run(bot, ctx, query, "start")
+
+        # Act
+        self.run(bot, ctx, query, f"kid={kid_token(KID)}")
+
+        # Assert
+        assert ctx.user_data["act"]["kid"] == KID.id
+        assert "כל כמה זמן" in query.edits[-1][0]
 
 
 class TestReminders:
