@@ -92,14 +92,14 @@ tasks:
       - docker build -t webtop-bot:{{.VERSION}} -t webtop-bot:latest .
 
   up:
-    desc: Build and start with docker compose
+    desc: Build from this checkout and start with docker compose
     cmds:
-      - docker compose up -d --build
+      - docker compose -f compose.yml -f compose.build.yml up -d --build
 
   down:
     desc: Stop docker compose
     cmds:
-      - docker compose down
+      - docker compose -f compose.yml -f compose.build.yml down
 
   dev:
     desc: Run in Docker with the working-tree code mounted (no rebuild per change; Ctrl+C to stop)
@@ -108,12 +108,12 @@ tasks:
       UID: {sh: id -u}
       GID: {sh: id -g}
     cmds:
-      - docker compose -p webtop-bot-dev -f compose.yml -f compose.dev.yml up {{.CLI_ARGS}}
+      - docker compose -p webtop-bot-dev -f compose.yml -f compose.build.yml -f compose.dev.yml up {{.CLI_ARGS}}
 
   dev-down:
     desc: Stop the dev container (after `task dev -- -d`)
     cmds:
-      - docker compose -p webtop-bot-dev -f compose.yml -f compose.dev.yml down
+      - docker compose -p webtop-bot-dev -f compose.yml -f compose.build.yml -f compose.dev.yml down
 
   # --- release (CI publishes elyoni/webtop-bot:<version> on a vX.Y.Z tag) -------
 

@@ -8,13 +8,15 @@ Each family runs its own copy: one bot, one Webtop parent account, any number of
 
 ## Quick start (Docker)
 
-You need a machine that stays on (home server, Raspberry Pi, NAS, VPS) with Docker and git.
+You need a machine that stays on (home server, Raspberry Pi, NAS, VPS) with Docker (with the Compose plugin).
+The bot runs the published image [`elyoni/webtop-bot`](https://hub.docker.com/r/elyoni/webtop-bot); no git or build needed.
 
-1. **Clone and configure**
+1. **Get the two files** into a new folder
    ```sh
-   git clone https://github.com/elyoni/webtop-telegram-bot.git
-   cd webtop-telegram-bot
-   cp .env.example .env && chmod 600 .env
+   mkdir webtop-bot && cd webtop-bot
+   curl -fsSLO https://raw.githubusercontent.com/elyoni/webtop-telegram-bot/main/compose.yml
+   curl -fsSL -o .env https://raw.githubusercontent.com/elyoni/webtop-telegram-bot/main/.env.example
+   chmod 600 .env
    ```
 2. **Create your Telegram bot:** in Telegram, talk to [@BotFather](https://t.me/BotFather) → `/newbot`.
    Put the token in `TELEGRAM_BOT_TOKEN`.
@@ -23,14 +25,34 @@ You need a machine that stays on (home server, Raspberry Pi, NAS, VPS) with Dock
    [Obtaining the `data` parameter](https://github.com/elyoni/pywebtop#obtaining-the-data-parameter).
 4. **Start it**
    ```sh
-   docker compose up -d --build
+   docker compose up -d
    docker compose logs -f      # Ctrl+C to stop following
    ```
 5. **Make yourself admin:** send `/start` to your bot. It replies with your id.
    Put it in `TELEGRAM_ADMIN_IDS` and run `docker compose up -d` again.
 6. **Optional — Todoist:** add `TODOIST_TOKEN` (see Setup below) and `docker compose up -d`.
 
-Your data (db, logs) lives in the `bot-data` Docker volume. Update with `git pull && docker compose up -d --build`.
+### The files
+
+| File | What it holds | Edit? |
+|---|---|---|
+| `.env` | All settings: Webtop login, bot token, admin ids, optional Todoist token and times. Secrets, so `chmod 600`. | Yes: `WEBTOP_USERNAME`, `WEBTOP_PASSWORD`, `TELEGRAM_BOT_TOKEN`, then `TELEGRAM_ADMIN_IDS` (step 5). The rest is optional, documented in the file. |
+| `compose.yml` | Which image to run, restart policy, the data volume. | No. To pin a release, change `:latest` to e.g. `:0.4.0`. |
+
+The db (users, tasks, settings) lives in the `bot-data` Docker volume, not in the folder, so it survives updates.
+After editing `.env`, run `docker compose up -d` again to apply it.
+
+- **Update:** `docker compose pull && docker compose up -d`
+- **Backup the db:** `docker compose cp bot:/data/bot.db ./bot.db.bak`
+- **Stop:** `docker compose down` (the volume and its data stay)
+
+Without Compose, the same thing is:
+```sh
+docker run -d --name webtop-bot --restart unless-stopped --env-file .env -v webtop-bot-data:/data elyoni/webtop-bot:latest
+```
+
+To build from source instead: clone the repo, create `.env`, and run `task up`
+(= `docker compose -f compose.yml -f compose.build.yml up -d --build`).
 
 - **Local db**: Webtop data (last, current and next week) is pulled into SQLite; all commands read
   from it, never from Webtop directly.
@@ -123,9 +145,9 @@ container restart, no rebuild; `task dev -- -d` + `task dev-down` for background
 |                  | How to get it                                                                                                                                     |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Last release** | `docker pull elyoni/webtop-bot:latest` (or a pinned `:0.3.0`). Source: latest `vX.Y.Z` [tag](https://github.com/elyoni/webtop-telegram-bot/tags). |
-| **Last dev**     | `main` branch, no published image: `git clone https://github.com/elyoni/webtop-telegram-bot.git && docker compose up -d --build`.                 |
+| **Last dev**     | `main` branch, no published image: clone the repo, then `task up` (builds from source with `compose.build.yml`).                                   |
 
-To run the released image, replace `build: .` in `compose.yml` with `image: elyoni/webtop-bot:latest`.
+`compose.yml` runs the released image; `compose.build.yml` overrides it to build from the checkout.
 
 ### CI / release (GitHub Actions)
 

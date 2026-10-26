@@ -1,6 +1,9 @@
+# Runs the published image. Users need only this file and .env in one folder:
+#   docker compose up -d
+# To build from this checkout instead: task up (adds compose.build.yml).
 services:
   bot:
-    build: .
+    image: elyoni/webtop-bot:latest  # or pin a release, e.g. elyoni/webtop-bot:0.4.0
     env_file: .env
     volumes:
       - bot-data:/data
