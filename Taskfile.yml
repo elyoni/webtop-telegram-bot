@@ -125,7 +125,7 @@ tasks:
         msg: Uncommitted changes
       - sh: '[ "$(git branch --show-current)" = main ]'
         msg: Release from main
-      - sh: '! git rev-parse -q --verify refs/tags/v{{.CLI_ARGS}} > /dev/null'
+      - sh: 'test -z "$(git tag -l v{{.CLI_ARGS}})"'  # not `! cmd`: task's shell always fails that
         msg: Tag v{{.CLI_ARGS}} already exists
     cmds:
       - sed -i 's/^version = ".*"/version = "{{.CLI_ARGS}}"/' pyproject.toml
