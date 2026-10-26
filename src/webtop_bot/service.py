@@ -241,10 +241,6 @@ class Service:
         self.store.set_message_body(msg.id, body, list(kids_in(body.recipients, self.store.kids())))
 
 
-def attachment_name(path: Path) -> str:
-    """The file name to show for a message_files() path."""
-    return path.name.split("-", 1)[1]
-
     async def push_to_todo(self) -> None:
         if not self.todo:
             return
@@ -353,3 +349,8 @@ def attachment_name(path: Path) -> str:
         task, _ = self.store.add_task(kid.id, self.cfg.today(), due, "", text, source="manual", notified=True)
         await self.push_to_todo()
         return task
+
+
+def attachment_name(path: Path) -> str:
+    """The file name to show for a message_files() path."""
+    return path.name.split("-", 1)[1]

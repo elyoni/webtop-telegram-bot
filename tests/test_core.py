@@ -692,3 +692,19 @@ class TestInbox:
         # Assert
         assert [m.id for m in store.messages(10)] == [a.id]
         assert store.message(b.id).status == "read"
+
+
+def test_botCode_serviceCalls_allExistOnService() -> None:
+    # Arrange: every self.service.<name> the bot uses (catches a class cut short by a stray top-level def)
+    import re
+
+    import webtop_bot.bot
+    from webtop_bot.service import Service
+
+    used = set(re.findall(r"self\.service\.(\w+)", Path(webtop_bot.bot.__file__).read_text()))
+
+    # Act
+    missing = sorted(name for name in used if not hasattr(Service, name) and name not in ("todo", "store", "cfg"))
+
+    # Assert
+    assert used and missing == []
