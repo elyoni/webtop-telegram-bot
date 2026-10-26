@@ -7,6 +7,7 @@ import hashlib
 import html
 import logging
 import re
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -85,7 +86,9 @@ MORE_BUTTONS = [  # ☰ עוד: (label, command name)
     [("⬅️ אתמול", "yesterday"), ("🗓 השבוע", "week")],
     [("✉️ הודעות מורים", "messages"), ("🎒 חוגים ותזכורות", "activities")],
     [("🔄 עדכון מ-Webtop", "sync"), ("⚙️ הגדרות", "config")],
+    [("ℹ️ גרסה", "version")],
 ]
+RELEASES_URL = "https://github.com/elyoni/webtop-telegram-bot/releases"
 
 Buttons = List[InlineKeyboardButton]
 Handler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
@@ -252,6 +255,7 @@ class Bot:
             "messages": self.cmd_messages,
             "more": self.cmd_more,
             "config": self.cmd_config,
+            "version": self.cmd_version,
         }
         app.add_handler(CommandHandler("config", self._guard(self.cmd_config)))
         app.add_handler(MessageHandler(filters.Text([*MENU_BUTTONS, *LEGACY_MENU_BUTTONS]), self._guard(self.on_menu)))
@@ -491,7 +495,7 @@ class Bot:
             "<b>כפתורים</b>\n"
             "📅 היום · ➡️ מחר — שיעורים ושיעורי בית\n"
             "📋 משימות — משימות פתוחות, ➕ משימה חדשה (חד פעמית או קבועה), 🔁 קבועות\n"
-            "☰ עוד — ⬅️ אתמול, 🗓 השבוע, ✉️ הודעות מורים, 🎒 חוגים ותזכורות, 🔄 עדכון (פעם ב-30 דק׳), ⚙️ הגדרות\n"
+            "☰ עוד — ⬅️ אתמול, 🗓 השבוע, ✉️ הודעות מורים, 🎒 חוגים ותזכורות, 🔄 עדכון (פעם ב-30 דק׳), ⚙️ הגדרות, ℹ️ גרסה\n"
             "✉️ הודעה חדשה מהמורים נשלחת לכאן במלואה (וב-Webtop תסומן כנקראה): "
             "✔️ נקרא — לארכיון, ⭐ חשוב — נשארת בראש הרשימה\n"
             "✅ סימון משימה כבוצעה (↩️ ביטול)\n\n"
@@ -668,6 +672,14 @@ class Bot:
         )
         for path in files:
             await query.message.reply_document(path, filename=attachment_name(path))
+
+    async def cmd_version(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        try:
+            current = version("webtop-bot")
+        except PackageNotFoundError:  # running from a source tree that isn't installed
+            current = "?"
+        notes = f"{RELEASES_URL}/tag/v{current}" if current != "?" else RELEASES_URL
+        await self.reply(update, f"ℹ️ <b>webtop-bot {e(current)}</b>\n📝 מה חדש: {notes}\n{self.freshness()}")
 
     # --- admin ----------------------------------------------------------
 

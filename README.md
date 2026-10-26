@@ -69,7 +69,7 @@ To build from source instead: clone the repo, create `.env`, and run `task up`
 Everything is a button; only `/start`, `/help` and `/config` are commands.
 
 - **Bottom menu:** 📅 today · ➡️ tomorrow · 📋 tasks · ☰ more.
-- **☰ More:** ⬅️ yesterday · 🗓 week · ✉️ teacher messages · 🎒 activities and reminders · 🔄 update from Webtop · ⚙️ settings.
+- **☰ More:** ⬅️ yesterday · 🗓 week · ✉️ teacher messages · 🎒 activities and reminders · 🔄 update from Webtop · ⚙️ settings · ℹ️ version (with a link to its release notes).
 - **📋 Tasks:** open tasks with ✅ buttons, plus
   - **➕ New task:** pick the kid → how often → the text.
     *Once* (pick a date from the next 7 days), *every school day* (Sun–Fri), or *chosen weekdays*.
