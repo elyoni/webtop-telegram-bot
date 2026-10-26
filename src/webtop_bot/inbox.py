@@ -16,6 +16,8 @@ from .homework import Kid, _checked
 logger = logging.getLogger(__name__)
 
 MAX_BODY = 3000  # chars of plain text; the rest is on Webtop
+MAX_FILE_BYTES = 45 * 1024 * 1024  # Telegram bots can upload up to 50 MB
+SIZE_UNITS = {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3}
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,13 @@ class Body:
     recipients: str  # "last first, last first, ..."
     files: Tuple[str, ...]  # attachment names
     action: str  # "" | "signature" | "survey": the parent is asked to answer on Webtop
+
+
+@dataclass(frozen=True)
+class Attachment:
+    name: str
+    url: str  # Webtop's fileUrl; its token works in the session that fetched the message
+    size: int  # bytes, as Webtop reports it (0 if unknown)
 
 
 @dataclass(frozen=True)
@@ -134,8 +143,21 @@ def _file_name(f: Any) -> str:
     return f.strip() if isinstance(f, str) else ""
 
 
-async def fetch_body(client: WebtopClient, webtop_id: str) -> Body:
-    """Open a message (Webtop marks it read)."""
+def _attachment(f: Any) -> Optional[Attachment]:
+    name, url = _file_name(f), f.get("fileUrl") if isinstance(f, dict) else None
+    if not name or not url:
+        return None
+    size = (f.get("fileSize") or {}) if isinstance(f, dict) else {}
+    try:
+        n = int(float(size.get("size") or 0) * SIZE_UNITS.get(str(size.get("sizeName")).upper(), 0))
+    except (TypeError, ValueError):
+        n = 0
+    return Attachment(name, url, n)
+
+
+async def fetch_body(client: WebtopClient, webtop_id: str) -> Tuple[Body, List[Attachment]]:
+    """Open a message (Webtop marks it read). Also returns its attachments, to
+    download in the same session."""
     data = _checked(await client.get_message(message_id=webtop_id), "message") or {}
     msg = data.get("messageData") or {}
     text = html_to_text(msg.get("messageContent") or "")
@@ -145,4 +167,12 @@ async def fetch_body(client: WebtopClient, webtop_id: str) -> Body:
     if not files and msg.get("filesWereAttached"):
         files = ("קובץ מצורף",)
     action = "signature" if data.get("signature") else "survey" if data.get("survey") else ""
-    return Body(text=text, recipients=(msg.get("recipientsName") or "").strip(), files=files, action=action)
+    body = Body(text=text, recipients=(msg.get("recipientsName") or "").strip(), files=files, action=action)
+    return body, [a for a in map(_attachment, msg.get("filesList") or []) if a]
+
+
+def safe_name(name: str) -> str:
+    """A file name safe to write under our directory."""
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip(" .") or "file"
+    stem, dot, ext = name.rpartition(".")
+    return (stem[: 119 - len(ext)] + dot + ext) if dot and len(ext) <= 10 else name[:120]

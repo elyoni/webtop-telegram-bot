@@ -11,7 +11,7 @@ import pytest
 
 from webtop_bot.bot import message_visible
 from webtop_bot.homework import Event, Kid, Lesson, WebtopDataError, _checked, _merge_teachers
-from webtop_bot.inbox import Body, Header, html_to_text, kids_in
+from webtop_bot.inbox import Body, Header, _attachment, html_to_text, kids_in, safe_name
 from webtop_bot.settings import MAX_PENDING, Settings
 from webtop_bot.store import Store, utc_now
 
@@ -603,6 +603,26 @@ class TestInbox:
 
         # Assert
         assert text == "הורים יקרים,\nמחר טיול.\n\nטופס (https://x.co/f) x"
+
+    def test_webtopFileItem_attachment_parsesNameUrlAndSize(self) -> None:
+        # Arrange
+        item = {"fileName": "a.docx", "fileUrl": "https://w/server/api/stream/GetFile?token=t",
+                "fileSize": {"size": 52.625, "sizeType": 2, "sizeName": "KB"}}
+
+        # Act
+        att = _attachment(item)
+
+        # Assert
+        assert (att.name, att.size) == ("a.docx", 53888)
+        assert _attachment({"fileName": "x"}) is None  # no url: nothing to download
+
+    def test_hostileName_safeName_staysInFolderAndKeepsExtension(self) -> None:
+        # Act / Assert
+        assert safe_name("../../etc/passwd") == "_.._etc_passwd"
+        assert safe_name("דף עבודה.pdf") == "דף עבודה.pdf"
+        assert safe_name("x" * 300 + ".docx").endswith(".docx")
+        assert len(safe_name("x" * 300 + ".docx")) == 120
+        assert safe_name("..") == "file"
 
     def test_recipientsLastNameFirst_kidsIn_matchesKidByWords(self) -> None:
         # Arrange

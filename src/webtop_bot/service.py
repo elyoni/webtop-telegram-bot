@@ -4,14 +4,16 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import shutil
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Tuple
 
 from .config import Config
 from webtop import WebtopClient
 
 from .homework import Kid, Lesson, fetch_all, is_school_day, make_client, next_school_day, week_start
-from .inbox import Message, fetch_body, fetch_headers, kids_in
+from .inbox import MAX_FILE_BYTES, Message, fetch_body, fetch_headers, kids_in, safe_name
 from .store import Recurring, Store, Task
 
 logger = logging.getLogger(__name__)
@@ -197,9 +199,9 @@ class Service:
         return new
 
     async def open_message(self, message_id: int) -> Optional[Message]:
-        """A stored message, fetching its text first if it hasn't been."""
+        """A stored message, fetching its text (and attachments) first if it hasn't been."""
         msg = self.store.message(message_id)
-        if msg and msg.body is None:
+        if msg and (msg.body is None or msg.body.files and not self._files_dir(msg.id).is_dir()):
             async with self._inbox_lock:
                 async with make_client(self.cfg) as client:
                     await client.login()
@@ -207,13 +209,41 @@ class Service:
             msg = self.store.message(message_id)
         return msg
 
+    def _files_dir(self, message_id: int) -> Path:
+        return self.cfg.data_dir / "files" / str(message_id)
+
+    def message_files(self, message_id: int) -> List[Path]:
+        """The message's downloaded attachments, in Webtop's order (see attachment_name())."""
+        folder = self._files_dir(message_id)
+        return sorted(folder.iterdir(), key=lambda p: int(p.name.split("-", 1)[0])) if folder.is_dir() else []
+
     async def _fetch_body(self, client: WebtopClient, msg: Message) -> None:
         try:
-            body = await fetch_body(client, msg.header.webtop_id)
+            body, attachments = await fetch_body(client, msg.header.webtop_id)
         except Exception as e:
             logger.warning("Could not fetch message %s: %s", msg.id, e)
             return  # tried again next time
+        # Attachments are downloaded now: their tokens come with the message. The folder
+        # exists once this ran, even if empty (e.g. a file too big for Telegram).
+        folder = self._files_dir(msg.id)
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True)
+        for i, att in enumerate(attachments):
+            if att.size > MAX_FILE_BYTES:
+                continue
+            try:
+                content = await client.download_file(file_url=att.url)
+            except Exception as e:
+                logger.warning("Could not download attachment %s of message %s: %s", i, msg.id, e)
+                continue
+            if len(content) <= MAX_FILE_BYTES:
+                (folder / f"{i}-{safe_name(att.name)}").write_bytes(content)
         self.store.set_message_body(msg.id, body, list(kids_in(body.recipients, self.store.kids())))
+
+
+def attachment_name(path: Path) -> str:
+    """The file name to show for a message_files() path."""
+    return path.name.split("-", 1)[1]
 
     async def push_to_todo(self) -> None:
         if not self.todo:

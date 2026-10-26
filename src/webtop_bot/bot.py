@@ -7,6 +7,7 @@ import hashlib
 import html
 import logging
 import re
+from pathlib import Path
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from telegram import Bot as TelegramBot
@@ -35,7 +36,7 @@ from telegram.ext import (
 from .config import Config
 from .homework import Event, Kid, Lesson, is_school_day, next_school_day, prev_school_day, week_start
 from .inbox import Message as InboxMessage
-from .service import Reminder, Service, SyncBusy, SyncCooldown, homework_text
+from .service import Reminder, Service, SyncBusy, SyncCooldown, attachment_name, homework_text
 from .settings import OFF, POLL_OPTIONS, Settings, fmt
 from .store import Activity, Task, utc_now
 
@@ -178,8 +179,9 @@ def message_buttons(msg: InboxMessage) -> Buttons:
     return [read, star]
 
 
-def message_text(msg: InboxMessage, kids: Dict[str, str]) -> str:
-    """A whole message; `kids` maps kid id -> first name."""
+def message_text(msg: InboxMessage, kids: Dict[str, str], sent_files: int = 0) -> str:
+    """A whole message; `kids` maps kid id -> first name. `sent_files` attachments
+    follow it as documents; the rest are only on Webtop."""
     h, body = msg.header, msg.body
     mark = {"important": "⭐", "read": "🗄"}.get(msg.status, "✉️")
     lines = [f"{mark} <b>{e(h.subject or '(ללא נושא)')}</b>", f"👤 {e(h.sender)} · {h.sent_at:%d/%m %H:%M}"]
@@ -193,14 +195,18 @@ def message_text(msg: InboxMessage, kids: Dict[str, str]) -> str:
     if body.text:
         parts.append(e(body.text))
     notes = []
-    if body.files:
+    if body.files and sent_files >= len(body.files):
+        notes.append(f"📎 {len(body.files)} קבצים מצורפים — למטה ⬇️" if len(body.files) > 1 else "📎 קובץ מצורף — למטה ⬇️")
+    elif body.files:
         notes.append("📎 " + e(", ".join(body.files)) + " — הקבצים ב-Webtop")
     if body.action == "signature":
         notes.append("✍️ מבקשים חתימה — לחתום ב-Webtop")
     elif body.action == "survey":
         notes.append("📝 מבקשים למלא סקר — ב-Webtop")
-    if notes:
+    if notes and (body.action or sent_files < len(body.files)):
         parts.append("\n".join(notes) + f"\n{WEBTOP_URL}")
+    elif notes:
+        parts.append("\n".join(notes))
     return "\n\n".join(parts)
 
 
@@ -339,16 +345,19 @@ class Bot:
 
     async def broadcast(
         self, context: ContextTypes.DEFAULT_TYPE, make: Callable[[set[str]], Optional[Message]],
-        chat_ids: Optional[Iterable[int]] = None,
+        chat_ids: Optional[Iterable[int]] = None, files: Sequence[Path] = (),
     ) -> None:
         """Send each chat (default: every allowed one) make(its hidden kid ids); None skips
-        that chat. A private chat's id is its user's id, so each user gets their own kids."""
+        that chat. A private chat's id is its user's id, so each user gets their own kids.
+        `files` (message attachments) follow the message as documents."""
         for chat_id in self.allowed_ids() if chat_ids is None else chat_ids:
             message = make(self.store.hidden_kids(chat_id))
             if not message:
                 continue
             try:  # one blocked / deleted chat mustn't stop the others
                 await self._send_chunks(lambda t, m: context.bot.send_message(chat_id, t, reply_markup=m), *message)
+                for path in files:
+                    await context.bot.send_document(chat_id, path, filename=attachment_name(path))
             except Exception as ex:
                 logger.warning("Could not send to chat %s: %s", chat_id, ex)
 
@@ -652,10 +661,13 @@ class Bot:
             return
         await query.answer("⏳ טוען מ-Webtop…" if msg.body is None else "")
         msg = await self.service.open_message(message_id)
+        files = self.service.message_files(msg.id)
         await self._send_chunks(
             lambda t, m: query.message.reply_text(t, reply_markup=m),
-            message_text(msg, self._kid_first_names()), message_buttons(msg),
+            message_text(msg, self._kid_first_names(), len(files)), message_buttons(msg),
         )
+        for path in files:
+            await query.message.reply_document(path, filename=attachment_name(path))
 
     # --- admin ----------------------------------------------------------
 
@@ -1388,9 +1400,13 @@ class Bot:
             return 0
         kids = self._kid_first_names()
         for msg in messages:
+            files = self.service.message_files(msg.id)
             await self.broadcast(
                 context,
-                lambda hidden, msg=msg: (message_text(msg, kids), message_buttons(msg)) if message_visible(msg, hidden) else None,
+                lambda hidden, msg=msg, n=len(files): (
+                    (message_text(msg, kids, n), message_buttons(msg)) if message_visible(msg, hidden) else None
+                ),
+                files=files,
             )
         return len(messages)
 
