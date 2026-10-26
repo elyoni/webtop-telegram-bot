@@ -9,7 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from webtop_bot.bot import message_visible
 from webtop_bot.homework import Event, Kid, Lesson, WebtopDataError, _checked, _merge_teachers
+from webtop_bot.inbox import Body, Header, html_to_text, kids_in
 from webtop_bot.settings import MAX_PENDING, Settings
 from webtop_bot.store import Store, utc_now
 
@@ -584,3 +586,64 @@ class TestMoreMenu:
         # Assert
         names = {*MENU_BUTTONS.values(), *LEGACY_MENU_BUTTONS.values(), *(n for row in MORE_BUTTONS for _, n in row)}
         assert names <= set(bot.commands)
+
+
+def header(webtop_id: str, hour: int = 10) -> Header:
+    return Header(webtop_id, dt.datetime(2026, 10, 26, hour), "מיכל אהרוני", "טיול", False)
+
+
+class TestInbox:
+    def test_teacherHtml_toText_keepsParagraphsAndLinks(self) -> None:
+        # Arrange
+        html = ('<div style="font:16px Tahoma">הורים יקרים,<br>מחר&nbsp;טיול.</div><style>p{}</style>'
+                '<p></p><p></p><p><a href="https://x.co/f">טופס</a> <a href="javascript:void(0)">x</a></p>')
+
+        # Act
+        text = html_to_text(html)
+
+        # Assert
+        assert text == "הורים יקרים,\nמחר טיול.\n\nטופס (https://x.co/f) x"
+
+    def test_recipientsLastNameFirst_kidsIn_matchesKidByWords(self) -> None:
+        # Arrange
+        nadav = Kid(id="name:Nadav Elentok", name="Nadav Elentok", class_code=2, class_number=3)
+
+        # Act
+        found = kids_in("Elentok Yonatan, Elentok Nadav", [KID, nadav])
+
+        # Assert
+        assert found == ("name:Nadav Elentok",)
+
+    def test_firstRun_addMessages_storedAsAlreadyAnnounced(self, store: Store) -> None:
+        # Act
+        added = store.add_messages([header("a", hour=12), header("b")], notified=True)
+        for msg in added:
+            store.set_message_body(msg.id, Body("text", "", (), ""), [])
+
+        # Assert
+        assert store.unnotified_messages() == []
+        assert [m.header.webtop_id for m in store.messages(10)] == ["a", "b"]
+
+    def test_newMessage_untilBodyFetched_notAnnouncedAndOnlyNewOneAdded(self, store: Store) -> None:
+        # Arrange
+        store.add_messages([header("a")], notified=True)
+
+        # Act
+        added = store.add_messages([header("b", hour=12), header("a")], notified=False)
+
+        # Assert
+        assert [m.header.webtop_id for m in added] == ["b"]
+        assert store.unnotified_messages() == []
+        assert [m.id for m in store.unfetched_unnotified()] == [added[0].id]
+        store.set_message_body(added[0].id, Body("מחר טיול", "Elentok Yoav", ("form.pdf",), "signature"), [KID.id])
+        msg = store.unnotified_messages()[0]
+        assert (msg.body.files, msg.body.action, msg.kid_ids) == (("form.pdf",), "signature", (KID.id,))
+
+    def test_messageAboutHiddenKid_visible_hiddenButGeneralShown(self, store: Store) -> None:
+        # Arrange
+        about_kid, general = store.add_messages([header("a"), header("b")], notified=False)
+        store.set_message_body(about_kid.id, Body("", "", (), ""), [KID.id])
+
+        # Act / Assert
+        assert not message_visible(store.message(about_kid.id), {KID.id})
+        assert message_visible(store.message(general.id), {KID.id})

@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Protocol, Tuple
 
 from .config import Config
-from .homework import Kid, Lesson, fetch_all, is_school_day, next_school_day, week_start
+from webtop import WebtopClient
+
+from .homework import Kid, Lesson, fetch_all, is_school_day, make_client, next_school_day, week_start
+from .inbox import Message, fetch_body, fetch_headers, kids_in
 from .store import Recurring, Store, Task
 
 logger = logging.getLogger(__name__)
@@ -73,6 +76,7 @@ class Service:
         self.todo = todo
         self._lock = asyncio.Lock()  # Webtop refresh
         self._todo_lock = asyncio.Lock()  # task-app push / pull
+        self._inbox_lock = asyncio.Lock()  # Webtop messages
 
     # --- reading (local db only) ----------------------------------------
 
@@ -171,6 +175,45 @@ class Service:
         await self.pull_from_todo()  # imported tasks are unnotified, so returned below
         today = self.cfg.today()
         return [t for t in self.store.unnotified_tasks() if t.due_date >= today]
+
+    # --- teachers' messages -----------------------------------------------
+
+    async def refresh_messages(self) -> List[Message]:
+        """Fetch new inbox messages with their text (Webtop marks them read). Returns the
+        ones to announce, already marked notified so an overlapping check can't repeat
+        them. On the first run the inbox is only listed, so it isn't all announced and
+        marked read at once."""
+        if self._inbox_lock.locked():
+            return []
+        async with self._inbox_lock:
+            async with make_client(self.cfg) as client:
+                await client.login()
+                first_run = not self.store.has_messages()
+                self.store.add_messages(await fetch_headers(client), notified=first_run)
+                for msg in self.store.unfetched_unnotified():
+                    await self._fetch_body(client, msg)
+            new = self.store.unnotified_messages()
+            self.store.mark_messages_notified([m.id for m in new])
+        return new
+
+    async def open_message(self, message_id: int) -> Optional[Message]:
+        """A stored message, fetching its text first if it hasn't been."""
+        msg = self.store.message(message_id)
+        if msg and msg.body is None:
+            async with self._inbox_lock:
+                async with make_client(self.cfg) as client:
+                    await client.login()
+                    await self._fetch_body(client, msg)
+            msg = self.store.message(message_id)
+        return msg
+
+    async def _fetch_body(self, client: WebtopClient, msg: Message) -> None:
+        try:
+            body = await fetch_body(client, msg.header.webtop_id)
+        except Exception as e:
+            logger.warning("Could not fetch message %s: %s", msg.id, e)
+            return  # tried again next time
+        self.store.set_message_body(msg.id, body, list(kids_in(body.recipients, self.store.kids())))
 
     async def push_to_todo(self) -> None:
         if not self.todo:

@@ -1,4 +1,4 @@
-"""SQLite storage: known kids, homework tasks (and their To Do ids), lesson topics."""
+"""SQLite storage: known kids, homework tasks (and their To Do ids), lesson topics, inbox messages."""
 from __future__ import annotations
 
 import datetime as dt
@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .homework import Event, Kid, Lesson, kid_id
+from .inbox import Body, Header, Message
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kids (
@@ -114,6 +115,20 @@ CREATE TABLE IF NOT EXISTS events (       -- teacher notes from Webtop ("מיל�
     hour INTEGER NOT NULL,
     remark TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS messages (     -- the Webtop inbox (teachers' messages)
+    id INTEGER PRIMARY KEY,
+    webtop_id TEXT NOT NULL UNIQUE,       -- Webtop's messageId
+    sent_at TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    has_files INTEGER NOT NULL,
+    body TEXT,                            -- plain text; NULL until fetched (fetching marks it read on Webtop)
+    recipients TEXT NOT NULL DEFAULT '',
+    files TEXT NOT NULL DEFAULT '',       -- attachment names, one per line
+    action TEXT NOT NULL DEFAULT '',      -- signature | survey: to answer on Webtop
+    kid_ids TEXT NOT NULL DEFAULT '',     -- kids among the recipients, one per line
+    notified INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -207,6 +222,15 @@ def _task(row: sqlite3.Row) -> Task:
         todo_list_id=row[9],
         todo_task_id=row[10],
     )
+
+
+MESSAGE_COLUMNS = "id, webtop_id, sent_at, sender, subject, has_files, body, recipients, files, action, kid_ids"
+
+
+def _message(row: sqlite3.Row) -> Message:
+    header = Header(row[1], dt.datetime.fromisoformat(row[2]), row[3], row[4], bool(row[5]))
+    body = None if row[6] is None else Body(row[6], row[7], tuple(filter(None, row[8].split("\n"))), row[9])
+    return Message(row[0], header, body, tuple(filter(None, row[10].split("\n"))))
 
 
 class Store:
@@ -680,4 +704,54 @@ class Store:
             "ON CONFLICT(kid_id) DO UPDATE SET list_id=excluded.list_id",
             (kid_id, list_id),
         )
+        self._db.commit()
+
+    # inbox messages
+
+    def has_messages(self) -> bool:
+        return self._db.execute("SELECT 1 FROM messages LIMIT 1").fetchone() is not None
+
+    def add_messages(self, headers: List[Header], notified: bool) -> List[Message]:
+        """Store the messages not seen before; returns them."""
+        added = []
+        for h in headers:
+            cur = self._db.execute(
+                "INSERT OR IGNORE INTO messages (webtop_id, sent_at, sender, subject, has_files, notified) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (h.webtop_id, h.sent_at.isoformat(), h.sender, h.subject, int(h.has_files), int(notified)),
+            )
+            if cur.rowcount:
+                added.append(Message(cur.lastrowid, h, None, ()))
+        self._db.commit()
+        return added
+
+    def set_message_body(self, message_id: int, body: Body, kid_ids: List[str]) -> None:
+        self._db.execute(
+            "UPDATE messages SET body = ?, recipients = ?, files = ?, action = ?, kid_ids = ? WHERE id = ?",
+            (body.text, body.recipients, "\n".join(body.files), body.action, "\n".join(kid_ids), message_id),
+        )
+        self._db.commit()
+
+    def message(self, message_id: int) -> Optional[Message]:
+        row = self._db.execute(f"SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?", (message_id,)).fetchone()
+        return _message(row) if row else None
+
+    def messages(self, limit: int) -> List[Message]:
+        """The newest first."""
+        rows = self._db.execute(f"SELECT {MESSAGE_COLUMNS} FROM messages ORDER BY sent_at DESC, id DESC LIMIT ?", (limit,))
+        return [_message(r) for r in rows]
+
+    def unnotified_messages(self) -> List[Message]:
+        """Not yet announced, oldest first; those not fetched yet are left for a later try."""
+        rows = self._db.execute(
+            f"SELECT {MESSAGE_COLUMNS} FROM messages WHERE notified = 0 AND body IS NOT NULL ORDER BY sent_at, id"
+        )
+        return [_message(r) for r in rows]
+
+    def unfetched_unnotified(self) -> List[Message]:
+        rows = self._db.execute(f"SELECT {MESSAGE_COLUMNS} FROM messages WHERE notified = 0 AND body IS NULL ORDER BY id")
+        return [_message(r) for r in rows]
+
+    def mark_messages_notified(self, message_ids: List[int]) -> None:
+        self._db.executemany("UPDATE messages SET notified = 1 WHERE id = ?", [(i,) for i in message_ids])
         self._db.commit()

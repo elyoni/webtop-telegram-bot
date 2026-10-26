@@ -34,6 +34,7 @@ from telegram.ext import (
 
 from .config import Config
 from .homework import Event, Kid, Lesson, is_school_day, next_school_day, prev_school_day, week_start
+from .inbox import Message as InboxMessage
 from .service import Reminder, Service, SyncBusy, SyncCooldown, homework_text
 from .settings import OFF, POLL_OPTIONS, Settings, fmt
 from .store import Activity, Task, utc_now
@@ -44,6 +45,7 @@ DAY_NAMES = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "ש
 MAX_MESSAGE = 3900  # Telegram's limit is 4096
 
 COMMANDS = [
+    BotCommand("messages", "הודעות מהמורים"),
     BotCommand("config", "הגדרות: ילדים, שעות הסיכום והתזכורת"),
     BotCommand("help", "עזרה ומקרא סימנים"),
 ]
@@ -60,6 +62,9 @@ EVENT_EMOJI = {"good": "🌟", "bad": "⚠️", "neutral": "⚪"}
 NEXT_KIND = {"good": "bad", "bad": "neutral", "neutral": "good"}
 FLOWS = ("new", "act", "rem")  # user_data keys of the multi-step "add" flows; one at a time
 DUE_CHOICES = 7  # days offered for a one-time task
+MESSAGE_LIST = 10  # messages in /messages
+MESSAGE_POLL_HOURS = (7, 22)  # inbox checks between these hours, so new messages don't ring at night
+WEBTOP_URL = "https://webtop.smartschool.co.il"
 
 # Persistent keyboard: button text -> command name. The rest is under ☰ עוד (see MORE_BUTTONS).
 MENU_BUTTONS = {
@@ -78,7 +83,7 @@ LEGACY_MENU_BUTTONS = {
 MENU = ReplyKeyboardMarkup([list(MENU_BUTTONS)], resize_keyboard=True, is_persistent=True)
 MORE_BUTTONS = [  # ☰ עוד: (label, command name)
     [("⬅️ אתמול", "yesterday"), ("🗓 השבוע", "week")],
-    [("🎒 חוגים ותזכורות", "activities")],
+    [("✉️ הודעות מורים", "messages"), ("🎒 חוגים ותזכורות", "activities")],
     [("🔄 עדכון מ-Webtop", "sync"), ("⚙️ הגדרות", "config")],
 ]
 
@@ -160,6 +165,36 @@ def event_line(ev: Event, kind: str) -> str:
     return line + (f" — <i>{e(ev.remark)}</i>" if ev.remark else "")
 
 
+def message_visible(msg: InboxMessage, hidden: set[str]) -> bool:
+    """Shown unless it is only about kids the user chose to hide."""
+    return not msg.kid_ids or not set(msg.kid_ids) <= hidden
+
+
+def message_text(msg: InboxMessage, kids: Dict[str, str]) -> str:
+    """A whole message; `kids` maps kid id -> first name."""
+    h, body = msg.header, msg.body
+    lines = [f"✉️ <b>{e(h.subject or '(ללא נושא)')}</b>", f"👤 {e(h.sender)} · {h.sent_at:%d/%m %H:%M}"]
+    names = [kids[k] for k in msg.kid_ids if k in kids]
+    if names:
+        lines.append("🧒 " + e(", ".join(names)))
+    parts = ["\n".join(lines)]
+    if body is None:
+        parts.append("<i>לא ניתן לטעון את תוכן ההודעה — נסו שוב מאוחר יותר.</i>")
+        return "\n\n".join(parts)
+    if body.text:
+        parts.append(e(body.text))
+    notes = []
+    if body.files:
+        notes.append("📎 " + e(", ".join(body.files)) + " — הקבצים ב-Webtop")
+    if body.action == "signature":
+        notes.append("✍️ מבקשים חתימה — לחתום ב-Webtop")
+    elif body.action == "survey":
+        notes.append("📝 מבקשים למלא סקר — ב-Webtop")
+    if notes:
+        parts.append("\n".join(notes) + f"\n{WEBTOP_URL}")
+    return "\n\n".join(parts)
+
+
 class Bot:
     def __init__(self, cfg: Config, service: Service):
         self.cfg = cfg
@@ -199,10 +234,12 @@ class Bot:
             "todo": self.cmd_todo,
             "sync": self.cmd_sync,
             "activities": self.cmd_activities,
+            "messages": self.cmd_messages,
             "more": self.cmd_more,
             "config": self.cmd_config,
         }
         app.add_handler(CommandHandler("config", self._guard(self.cmd_config)))
+        app.add_handler(CommandHandler("messages", self._guard(self.cmd_messages)))
         app.add_handler(MessageHandler(filters.Text([*MENU_BUTTONS, *LEGACY_MENU_BUTTONS]), self._guard(self.on_menu)))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._guard(self.on_text)))
         app.add_handler(CallbackQueryHandler(self._guard(self.on_button)))
@@ -215,7 +252,7 @@ class Bot:
 
     def schedule_jobs(self, jq: JobQueue) -> None:
         """(Re)create the scheduled jobs from the current settings."""
-        for name in ("digest", "reminder", "sync", "todo_poll", "recurring"):
+        for name in ("digest", "reminder", "sync", "todo_poll", "recurring", "messages"):
             for job in jq.get_jobs_by_name(name):
                 job.schedule_removal()
         st, tz = self.settings, self.cfg.tz
@@ -234,6 +271,8 @@ class Bot:
             jq.run_daily(self.job_sync, at.replace(tzinfo=tz), name="sync")
         if self.service.todo and st.todo_poll_minutes:
             jq.run_repeating(self.job_todo_poll, interval=st.todo_poll_minutes * 60, first=60, name="todo_poll")
+        if self.cfg.message_poll_minutes:
+            jq.run_repeating(self.job_messages, interval=self.cfg.message_poll_minutes * 60, first=90, name="messages")
 
     async def _post_init(self, app: Application) -> None:
         """Register the command menu for allowed chats only; push pending tasks to the task app."""
@@ -435,7 +474,8 @@ class Bot:
             "<b>כפתורים</b>\n"
             "📅 היום · ➡️ מחר — שיעורים ושיעורי בית\n"
             "📋 משימות — משימות פתוחות, ➕ משימה חדשה (חד פעמית או קבועה), 🔁 קבועות\n"
-            "☰ עוד — ⬅️ אתמול, 🗓 השבוע, 🎒 חוגים ותזכורות, 🔄 עדכון (פעם ב-30 דק׳), ⚙️ הגדרות\n"
+            "☰ עוד — ⬅️ אתמול, 🗓 השבוע, ✉️ הודעות מורים, 🎒 חוגים ותזכורות, 🔄 עדכון (פעם ב-30 דק׳), ⚙️ הגדרות\n"
+            "✉️ הודעה חדשה מהמורים נשלחת לכאן במלואה (וב-Webtop תסומן כנקראה)\n"
             "✅ סימון משימה כבוצעה (↩️ ביטול)\n\n"
             "<b>סימנים</b>\n"
             "✅ משימה בוצעה\n"
@@ -532,7 +572,39 @@ class Bot:
             return
         if new:
             await self._announce(context, new)
-        await self.reply(update, f"✅ עודכן. שיעורי בית חדשים: {len(new)}")
+        messages = await self._check_messages(context)
+        await self.reply(update, f"✅ עודכן. שיעורי בית חדשים: {len(new)} · הודעות חדשות: {messages}")
+
+    def _kid_first_names(self) -> Dict[str, str]:
+        return {k.id: k.first_name for k in self.store.kids()}
+
+    async def cmd_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        hidden = self.store.hidden_kids(update.effective_user.id)
+        messages = [m for m in self.store.messages(MESSAGE_LIST * 3) if message_visible(m, hidden)][:MESSAGE_LIST]
+        if not messages:
+            await self.reply(update, f"📭 אין הודעות.\n{self.freshness()}")
+            return
+        kids = self._kid_first_names()
+        lines = ["✉️ <b>הודעות אחרונות</b> — לחצו לקריאה", ""]
+        buttons = []
+        for i, m in enumerate(messages, 1):
+            names = ", ".join(kids[k] for k in m.kid_ids if k in kids)
+            line = f"{i}. {m.header.sent_at:%d/%m} · {e(m.header.sender)} — <b>{e(m.header.subject)}</b>"
+            line += (f" ({e(names)})" if names else "") + (" 📎" if m.header.has_files else "")
+            lines.append(line)
+            buttons.append(InlineKeyboardButton(f"{i}. {short(m.header.subject, 28)}", callback_data=f"msg:{m.id}"))
+        await self.reply(update, "\n".join(lines), buttons)
+
+    async def _open_message(self, query: CallbackQuery, message_id: int) -> None:
+        msg = self.store.message(message_id)
+        if not msg:
+            await query.answer("ההודעה לא נמצאה")
+            return
+        await query.answer("⏳ טוען מ-Webtop…" if msg.body is None else "")
+        msg = await self.service.open_message(message_id)
+        await self._send_chunks(
+            lambda t, m: query.message.reply_text(t, reply_markup=m), message_text(msg, self._kid_first_names()), []
+        )
 
     # --- admin ----------------------------------------------------------
 
@@ -743,6 +815,9 @@ class Bot:
             return
         if action == "cfg":
             await self._config_action(query, context, raw_id)
+            return
+        if action == "msg":
+            await self._open_message(query, int(raw_id))
             return
         await query.answer("הכפתור הזה כבר לא פעיל — לחצו על 📅 היום")
 
@@ -1240,6 +1315,26 @@ class Bot:
             return
         if new:
             await self._announce(context, new)
+        await self._check_messages(context)
+
+    async def job_messages(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        start, end = MESSAGE_POLL_HOURS
+        if start <= self.cfg.now().hour < end:
+            await self._check_messages(context)
+
+    async def _check_messages(self, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Send each new teacher message in full; returns how many there were."""
+        try:
+            messages = await self.service.refresh_messages()
+        except Exception as ex:  # a sync failure is reported by job_sync; this one is retried soon
+            logger.warning("Inbox check failed: %s", ex)
+            return 0
+        kids = self._kid_first_names()
+        for msg in messages:
+            await self.broadcast(
+                context, lambda hidden, msg=msg: (message_text(msg, kids), []) if message_visible(msg, hidden) else None
+            )
+        return len(messages)
 
     async def _alert_sync_failure(self, context: ContextTypes.DEFAULT_TYPE, ex: Exception) -> None:
         """Tell the admins, once until a sync succeeds again."""

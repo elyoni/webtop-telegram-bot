@@ -53,6 +53,7 @@ class Config:
     sync_times: Tuple[dt.time, ...]
     sync_cooldown_minutes: int
     todo_poll_minutes: int  # task-app check interval; 0 = only with Webtop updates
+    message_poll_minutes: int  # Webtop inbox check interval (daytime); 0 = only with Webtop updates
     sync_weeks_back: int
     sync_weeks_ahead: int
 
@@ -74,6 +75,7 @@ class Config:
             sync_times=_times("SYNC_TIMES", "07:00,15:30"),
             sync_cooldown_minutes=int(os.environ.get("SYNC_COOLDOWN_MINUTES", "30")),
             todo_poll_minutes=int(os.environ.get("TODO_POLL_MINUTES", "10")),
+            message_poll_minutes=int(os.environ.get("MESSAGE_POLL_MINUTES", "30")),
             sync_weeks_back=int(os.environ.get("SYNC_WEEKS_BACK", "1")),
             sync_weeks_ahead=int(os.environ.get("SYNC_WEEKS_AHEAD", "1")),
         )

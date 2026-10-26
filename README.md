@@ -1,7 +1,7 @@
 # webtop-bot
 
 Telegram bot for parents: daily Webtop (SmartSchool) homework digests, new-homework alerts,
-and a shared to-do list (in Telegram, optionally mirrored to **Todoist**). Built on
+teachers' messages, and a shared to-do list (in Telegram, optionally mirrored to **Todoist**). Built on
 [pywebtop](https://github.com/elyoni/pywebtop) (installed automatically).
 
 Each family runs its own copy: one bot, one Webtop parent account, any number of kids.
@@ -44,10 +44,10 @@ Your data (db, logs) lives in the `bot-data` Docker volume. Update with `git pul
 
 ## Using the bot
 
-Everything is a button; only `/start`, `/help` and `/config` are commands.
+Everything is a button; only `/start`, `/help`, `/messages` and `/config` are commands.
 
 - **Bottom menu:** 📅 today · ➡️ tomorrow · 📋 tasks · ☰ more.
-- **☰ More:** ⬅️ yesterday · 🗓 week · 🎒 activities and reminders · 🔄 update from Webtop · ⚙️ settings.
+- **☰ More:** ⬅️ yesterday · 🗓 week · ✉️ teacher messages · 🎒 activities and reminders · 🔄 update from Webtop · ⚙️ settings.
 - **📋 Tasks:** open tasks with ✅ buttons, plus
   - **➕ New task:** pick the kid → how often → the text.
     *Once* (pick a date from the next 7 days), *every school day* (Sun–Fri), or *chosen weekdays*.
@@ -62,6 +62,11 @@ Everything is a button; only `/start`, `/help` and `/config` are commands.
   - **🔔 Reminder:** kid (or all) → text to find in a lesson or activity name (e.g. `חנג`) → note (e.g. `להביא נעליים`).
     The evening before a matching lesson or activity (evening reminder, and ➡️ tomorrow) the bot adds
     "🔔 Yoav · חנג — להביא נעליים". 🗑 deletes either.
+- **✉️ Teacher messages** (Webtop inbox): each new message is sent in full to every user (except one only
+  about kids that user hides). Checked every `MESSAGE_POLL_MINUTES` (default 30, 07:00–22:00) and with each Webtop update.
+  ✉️ messages (☰ more, or `/messages`) lists the last 10; tap one to read it. Attachments, signatures and surveys
+  are only named, with a link to Webtop. Opening a message (here or by the alert) marks it read on Webtop.
+  On the first run the inbox is only listed: nothing is sent or marked read.
 - **Teacher notes** are 🌟 good, ⚠️ bad or ⚪ neutral. Webtop's types differ per school, so admins choose in
   `/config` → 🏷 teacher-note types (tap to cycle). Every type starts neutral (Webtop's own good/bad flag is ignored).
 - `/config` — everyone: 👦 which kids to show (per user), their own daily summary and evening reminder time (or off).
