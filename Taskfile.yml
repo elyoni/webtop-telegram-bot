@@ -131,6 +131,7 @@ tasks:
       - sed -i 's/^version = ".*"/version = "{{.CLI_ARGS}}"/' pyproject.toml
       - uv lock -q
       - task: test
+        vars: {CLI_ARGS: ""}  # else pytest gets the version as a path
       - git commit -qam "Release {{.CLI_ARGS}}"
       - git tag v{{.CLI_ARGS}}
       - echo "Tagged v{{.CLI_ARGS}} — publish with 'task publish'"
