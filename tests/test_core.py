@@ -647,3 +647,28 @@ class TestInbox:
         # Act / Assert
         assert not message_visible(store.message(about_kid.id), {KID.id})
         assert message_visible(store.message(general.id), {KID.id})
+
+    def test_readAndImportant_messages_archiveSplitAndImportantFirst(self, store: Store) -> None:
+        # Arrange
+        old, mid, new = store.add_messages([header("old", 8), header("mid", 9), header("new", 10)], notified=True)
+
+        # Act
+        store.set_message_status(old.id, "important")
+        store.set_message_status(mid.id, "read")
+
+        # Assert
+        assert [m.header.webtop_id for m in store.messages(10)] == ["old", "new"]
+        assert [m.header.webtop_id for m in store.messages(10, archived=True)] == ["mid"]
+        assert (store.message_count(archived=False), store.message_count(archived=True)) == (2, 1)
+
+    def test_markAllRead_archive_keepsImportantInInbox(self, store: Store) -> None:
+        # Arrange
+        a, b = store.add_messages([header("a"), header("b")], notified=True)
+        store.set_message_status(a.id, "important")
+
+        # Act
+        store.archive_messages()
+
+        # Assert
+        assert [m.id for m in store.messages(10)] == [a.id]
+        assert store.message(b.id).status == "read"

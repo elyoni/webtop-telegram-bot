@@ -44,7 +44,7 @@ Your data (db, logs) lives in the `bot-data` Docker volume. Update with `git pul
 
 ## Using the bot
 
-Everything is a button; only `/start`, `/help`, `/messages` and `/config` are commands.
+Everything is a button; only `/start`, `/help` and `/config` are commands.
 
 - **Bottom menu:** 📅 today · ➡️ tomorrow · 📋 tasks · ☰ more.
 - **☰ More:** ⬅️ yesterday · 🗓 week · ✉️ teacher messages · 🎒 activities and reminders · 🔄 update from Webtop · ⚙️ settings.
@@ -64,7 +64,9 @@ Everything is a button; only `/start`, `/help`, `/messages` and `/config` are co
     "🔔 Yoav · חנג — להביא נעליים". 🗑 deletes either.
 - **✉️ Teacher messages** (Webtop inbox): each new message is sent in full to every user (except one only
   about kids that user hides). Checked every `MESSAGE_POLL_MINUTES` (default 30, 07:00–22:00) and with each Webtop update.
-  ✉️ messages (☰ more, or `/messages`) lists the last 10; tap one to read it. Attachments, signatures and surveys
+  ✉️ teacher messages (☰ more) lists the inbox, ⭐ important ones first; tap one to read it. Each message has
+  ✔️ read (moves it to 🗄 archive, a button under the list; ↩️ brings it back) and ⭐ important (stays at the top).
+  ✔️ mark all read archives everything except ⭐. This state is shared by all users. Attachments, signatures and surveys
   are only named, with a link to Webtop. Opening a message (here or by the alert) marks it read on Webtop.
   On the first run the inbox is only listed: nothing is sent or marked read.
 - **Teacher notes** are 🌟 good, ⚠️ bad or ⚪ neutral. Webtop's types differ per school, so admins choose in

@@ -45,7 +45,6 @@ DAY_NAMES = ["שני", "שלישי", "רביעי", "חמישי", "שישי", "ש
 MAX_MESSAGE = 3900  # Telegram's limit is 4096
 
 COMMANDS = [
-    BotCommand("messages", "הודעות מהמורים"),
     BotCommand("config", "הגדרות: ילדים, שעות הסיכום והתזכורת"),
     BotCommand("help", "עזרה ומקרא סימנים"),
 ]
@@ -62,7 +61,7 @@ EVENT_EMOJI = {"good": "🌟", "bad": "⚠️", "neutral": "⚪"}
 NEXT_KIND = {"good": "bad", "bad": "neutral", "neutral": "good"}
 FLOWS = ("new", "act", "rem")  # user_data keys of the multi-step "add" flows; one at a time
 DUE_CHOICES = 7  # days offered for a one-time task
-MESSAGE_LIST = 10  # messages in /messages
+MESSAGE_LIST = 10  # messages per list (inbox / archive)
 MESSAGE_POLL_HOURS = (7, 22)  # inbox checks between these hours, so new messages don't ring at night
 WEBTOP_URL = "https://webtop.smartschool.co.il"
 
@@ -170,10 +169,20 @@ def message_visible(msg: InboxMessage, hidden: set[str]) -> bool:
     return not msg.kid_ids or not set(msg.kid_ids) <= hidden
 
 
+def message_buttons(msg: InboxMessage) -> Buttons:
+    """✔️ read (to the archive) / ↩️ back to the inbox, and ⭐ important on / off."""
+    read = (InlineKeyboardButton("↩️ החזרה לתיבה", callback_data=f"mst:new.{msg.id}") if msg.status == "read"
+            else InlineKeyboardButton("✔️ נקרא (לארכיון)", callback_data=f"mst:read.{msg.id}"))
+    star = (InlineKeyboardButton("☆ לא חשוב", callback_data=f"mst:new.{msg.id}") if msg.status == "important"
+            else InlineKeyboardButton("⭐ חשוב", callback_data=f"mst:important.{msg.id}"))
+    return [read, star]
+
+
 def message_text(msg: InboxMessage, kids: Dict[str, str]) -> str:
     """A whole message; `kids` maps kid id -> first name."""
     h, body = msg.header, msg.body
-    lines = [f"✉️ <b>{e(h.subject or '(ללא נושא)')}</b>", f"👤 {e(h.sender)} · {h.sent_at:%d/%m %H:%M}"]
+    mark = {"important": "⭐", "read": "🗄"}.get(msg.status, "✉️")
+    lines = [f"{mark} <b>{e(h.subject or '(ללא נושא)')}</b>", f"👤 {e(h.sender)} · {h.sent_at:%d/%m %H:%M}"]
     names = [kids[k] for k in msg.kid_ids if k in kids]
     if names:
         lines.append("🧒 " + e(", ".join(names)))
@@ -239,7 +248,6 @@ class Bot:
             "config": self.cmd_config,
         }
         app.add_handler(CommandHandler("config", self._guard(self.cmd_config)))
-        app.add_handler(CommandHandler("messages", self._guard(self.cmd_messages)))
         app.add_handler(MessageHandler(filters.Text([*MENU_BUTTONS, *LEGACY_MENU_BUTTONS]), self._guard(self.on_menu)))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._guard(self.on_text)))
         app.add_handler(CallbackQueryHandler(self._guard(self.on_button)))
@@ -475,7 +483,8 @@ class Bot:
             "📅 היום · ➡️ מחר — שיעורים ושיעורי בית\n"
             "📋 משימות — משימות פתוחות, ➕ משימה חדשה (חד פעמית או קבועה), 🔁 קבועות\n"
             "☰ עוד — ⬅️ אתמול, 🗓 השבוע, ✉️ הודעות מורים, 🎒 חוגים ותזכורות, 🔄 עדכון (פעם ב-30 דק׳), ⚙️ הגדרות\n"
-            "✉️ הודעה חדשה מהמורים נשלחת לכאן במלואה (וב-Webtop תסומן כנקראה)\n"
+            "✉️ הודעה חדשה מהמורים נשלחת לכאן במלואה (וב-Webtop תסומן כנקראה): "
+            "✔️ נקרא — לארכיון, ⭐ חשוב — נשארת בראש הרשימה\n"
             "✅ סימון משימה כבוצעה (↩️ ביטול)\n\n"
             "<b>סימנים</b>\n"
             "✅ משימה בוצעה\n"
@@ -579,21 +588,62 @@ class Bot:
         return {k.id: k.first_name for k in self.store.kids()}
 
     async def cmd_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        hidden = self.store.hidden_kids(update.effective_user.id)
-        messages = [m for m in self.store.messages(MESSAGE_LIST * 3) if message_visible(m, hidden)][:MESSAGE_LIST]
+        text, rows = self._messages_screen(update.effective_user.id, archived=False)
+        await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+    def _messages_screen(self, user_id: int, archived: bool) -> Tuple[str, List[Buttons]]:
+        """The inbox (⭐ important first) or the archive (messages marked read): tap one to read it."""
+        hidden = self.store.hidden_kids(user_id)
+        messages = [m for m in self.store.messages(MESSAGE_LIST * 3, archived) if message_visible(m, hidden)][:MESSAGE_LIST]
+        btn = InlineKeyboardButton
+        if archived:
+            title = "🗄 <b>ארכיון</b> — הודעות שסומנו כנקראו"
+            controls = [btn("✉️ חזרה להודעות", callback_data="msgl:inbox")]
+        else:
+            title = "✉️ <b>הודעות מורים</b>"
+            controls = [btn(f"🗄 ארכיון ({self.store.message_count(archived=True)})", callback_data="msgl:archive")]
+            if any(m.status == "" for m in messages):
+                controls.append(btn("✔️ סימון הכל כנקרא", callback_data="msgl:readall"))
         if not messages:
-            await self.reply(update, f"📭 אין הודעות.\n{self.freshness()}")
-            return
+            return f"{title}\n\n{'📭 ריק' if archived else '🎉 אין הודעות שלא נקראו'}", [controls]
         kids = self._kid_first_names()
-        lines = ["✉️ <b>הודעות אחרונות</b> — לחצו לקריאה", ""]
-        buttons = []
+        lines = [f"{title} — לחצו לקריאה", ""]
+        buttons: Buttons = []
         for i, m in enumerate(messages, 1):
             names = ", ".join(kids[k] for k in m.kid_ids if k in kids)
-            line = f"{i}. {m.header.sent_at:%d/%m} · {e(m.header.sender)} — <b>{e(m.header.subject)}</b>"
+            star = "⭐ " if m.status == "important" else ""
+            line = f"{i}. {star}{m.header.sent_at:%d/%m} · {e(m.header.sender)} — <b>{e(m.header.subject)}</b>"
             line += (f" ({e(names)})" if names else "") + (" 📎" if m.header.has_files else "")
             lines.append(line)
-            buttons.append(InlineKeyboardButton(f"{i}. {short(m.header.subject, 28)}", callback_data=f"msg:{m.id}"))
-        await self.reply(update, "\n".join(lines), buttons)
+            buttons.append(btn(f"{i}. {star}{short(m.header.subject, 26)}", callback_data=f"msg:{m.id}"))
+        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)] + [controls]
+        if archived and self.store.message_count(archived=True) > len(messages):
+            lines.append(f"\n(מוצגות {len(messages)} האחרונות)")
+        return "\n".join(lines), rows
+
+    async def _messages_list_action(self, query: CallbackQuery, op: str) -> None:
+        if op == "readall":
+            self.store.archive_messages()
+            await query.answer("✔️ הכל סומן כנקרא (⭐ חשובות נשארות)")
+        else:
+            await query.answer()
+        await self._edit(query, *self._messages_screen(query.from_user.id, archived=op == "archive"))
+
+    async def _message_status(self, query: CallbackQuery, raw: str) -> None:
+        """✔️ / ↩️ / ⭐ / ☆ on a message: change its status and redraw its buttons."""
+        status, _, raw_id = raw.partition(".")
+        msg = self.store.message(int(raw_id))
+        if not msg or status not in ("new", "read", "important"):
+            await query.answer("ההודעה לא נמצאה")
+            return
+        status = "" if status == "new" else status
+        self.store.set_message_status(msg.id, status)
+        await query.answer({"read": "🗄 הועבר לארכיון", "important": "⭐ סומן כחשוב"}.get(status, "↩️ בתיבה"))
+        msg = self.store.message(msg.id)
+        try:
+            await query.edit_message_reply_markup(keyboard(message_buttons(msg)))
+        except BadRequest as ex:
+            logger.debug("Redraw skipped: %s", ex)
 
     async def _open_message(self, query: CallbackQuery, message_id: int) -> None:
         msg = self.store.message(message_id)
@@ -603,7 +653,8 @@ class Bot:
         await query.answer("⏳ טוען מ-Webtop…" if msg.body is None else "")
         msg = await self.service.open_message(message_id)
         await self._send_chunks(
-            lambda t, m: query.message.reply_text(t, reply_markup=m), message_text(msg, self._kid_first_names()), []
+            lambda t, m: query.message.reply_text(t, reply_markup=m),
+            message_text(msg, self._kid_first_names()), message_buttons(msg),
         )
 
     # --- admin ----------------------------------------------------------
@@ -818,6 +869,12 @@ class Bot:
             return
         if action == "msg":
             await self._open_message(query, int(raw_id))
+            return
+        if action == "msgl":
+            await self._messages_list_action(query, raw_id)
+            return
+        if action == "mst":
+            await self._message_status(query, raw_id)
             return
         await query.answer("הכפתור הזה כבר לא פעיל — לחצו על 📅 היום")
 
@@ -1332,7 +1389,8 @@ class Bot:
         kids = self._kid_first_names()
         for msg in messages:
             await self.broadcast(
-                context, lambda hidden, msg=msg: (message_text(msg, kids), []) if message_visible(msg, hidden) else None
+                context,
+                lambda hidden, msg=msg: (message_text(msg, kids), message_buttons(msg)) if message_visible(msg, hidden) else None,
             )
         return len(messages)
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import html
 import logging
 import re
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ class Message:
     header: Header
     body: Optional[Body]  # None until fetched
     kid_ids: Tuple[str, ...]  # kids among the recipients; empty = not about a specific kid
+    status: str = ""  # "" | "important" (pinned in the list) | "read" (archived)
 
 
 BLOCK_TAGS = {"p", "div", "br", "li", "tr", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "table", "ul", "ol"}
@@ -112,8 +114,8 @@ def _header(r: Any) -> Optional[Header]:
     return Header(
         webtop_id=r["messageId"],
         sent_at=sent_at,
-        sender=sender.strip(),
-        subject=(r.get("subject") or "").strip(),
+        sender=html.unescape(sender).strip(),  # Webtop sends e.g. "&#128591;" for 🙏
+        subject=html.unescape(r.get("subject") or "").strip(),
         has_files=bool(r.get("filesWereAttached")),
     )
 

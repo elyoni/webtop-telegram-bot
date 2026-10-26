@@ -224,13 +224,13 @@ def _task(row: sqlite3.Row) -> Task:
     )
 
 
-MESSAGE_COLUMNS = "id, webtop_id, sent_at, sender, subject, has_files, body, recipients, files, action, kid_ids"
+MESSAGE_COLUMNS = "id, webtop_id, sent_at, sender, subject, has_files, body, recipients, files, action, kid_ids, status"
 
 
 def _message(row: sqlite3.Row) -> Message:
     header = Header(row[1], dt.datetime.fromisoformat(row[2]), row[3], row[4], bool(row[5]))
     body = None if row[6] is None else Body(row[6], row[7], tuple(filter(None, row[8].split("\n"))), row[9])
-    return Message(row[0], header, body, tuple(filter(None, row[10].split("\n"))))
+    return Message(row[0], header, body, tuple(filter(None, row[10].split("\n"))), row[11])
 
 
 class Store:
@@ -246,6 +246,7 @@ class Store:
         self._add_column("events", "added_at", "TEXT NOT NULL DEFAULT ''")  # UTC ISO; '' = before the bot ran
         self._add_column("activities", "start_time", "TEXT NOT NULL DEFAULT ''")  # "HH:MM"
         self._add_column("activities", "end_time", "TEXT NOT NULL DEFAULT ''")
+        self._add_column("messages", "status", "TEXT NOT NULL DEFAULT ''")  # '' | important | read (archived)
 
     def _add_column(self, table: str, column: str, definition: str) -> None:
         if column not in {r[1] for r in self._db.execute(f"PRAGMA table_info({table})")}:
@@ -736,10 +737,27 @@ class Store:
         row = self._db.execute(f"SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?", (message_id,)).fetchone()
         return _message(row) if row else None
 
-    def messages(self, limit: int) -> List[Message]:
-        """The newest first."""
-        rows = self._db.execute(f"SELECT {MESSAGE_COLUMNS} FROM messages ORDER BY sent_at DESC, id DESC LIMIT ?", (limit,))
+    def messages(self, limit: int, archived: bool = False) -> List[Message]:
+        """The inbox (important ones first) or the archive (messages marked read); newest first."""
+        where, order = ("status = 'read'", "") if archived else ("status != 'read'", "status = 'important' DESC, ")
+        rows = self._db.execute(
+            f"SELECT {MESSAGE_COLUMNS} FROM messages WHERE {where} ORDER BY {order}sent_at DESC, id DESC LIMIT ?", (limit,)
+        )
         return [_message(r) for r in rows]
+
+    def message_count(self, archived: bool) -> int:
+        return self._db.execute(
+            f"SELECT COUNT(*) FROM messages WHERE status {'=' if archived else '!='} 'read'"
+        ).fetchone()[0]
+
+    def set_message_status(self, message_id: int, status: str) -> None:
+        self._db.execute("UPDATE messages SET status = ? WHERE id = ?", (status, message_id))
+        self._db.commit()
+
+    def archive_messages(self) -> None:
+        """Mark every inbox message read, except the important ones."""
+        self._db.execute("UPDATE messages SET status = 'read' WHERE status = ''")
+        self._db.commit()
 
     def unnotified_messages(self) -> List[Message]:
         """Not yet announced, oldest first; those not fetched yet are left for a later try."""
