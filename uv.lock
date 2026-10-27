@@ -123,7 +123,7 @@ job-queue = [
 [[package]]
 name = "pywebtop"
 version = "0.0.2"
-source = { git = "https://github.com/elyoni/pywebtop?rev=f9bc31a577f2eb90cc73ce5a84e511cd3af9ad0d#f9bc31a577f2eb90cc73ce5a84e511cd3af9ad0d" }
+source = { git = "https://github.com/elyoni/pywebtop?rev=b1643c9683aa3de922dc315263fa33a9fb62dcdc#b1643c9683aa3de922dc315263fa33a9fb62dcdc" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -173,6 +173,6 @@ dependencies = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.25,<1.0" },
     { name = "python-telegram-bot", extras = ["job-queue"], specifier = ">=21,<23" },
-    { name = "pywebtop", git = "https://github.com/elyoni/pywebtop?rev=f9bc31a577f2eb90cc73ce5a84e511cd3af9ad0d" },
+    { name = "pywebtop", git = "https://github.com/elyoni/pywebtop?rev=b1643c9683aa3de922dc315263fa33a9fb62dcdc" },
     { name = "tzdata" },
 ]

@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     # Fork with the weekly lessons/homework API (upstream PR t0mer/pywebtop#3), pinned to a commit.
-    "pywebtop @ git+https://github.com/elyoni/pywebtop@f9bc31a577f2eb90cc73ce5a84e511cd3af9ad0d",
+    "pywebtop @ git+https://github.com/elyoni/pywebtop@b1643c9683aa3de922dc315263fa33a9fb62dcdc",
     "python-telegram-bot[job-queue]>=21,<23",
     "httpx>=0.25,<1.0",
     "tzdata",
