@@ -109,7 +109,15 @@ def short(text: str, n: int = 24) -> str:
 
 
 def keyboard(buttons: Buttons, extra_rows: Sequence[Buttons] = ()) -> Optional[InlineKeyboardMarkup]:
-    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)] + [list(r) for r in extra_rows]
+    """Two buttons per row, except task buttons: one per row, so their labels aren't cut."""
+    rows: List[Buttons] = []
+    for b in buttons:
+        if str(b.callback_data).startswith(("done:", "undo:")) or not rows or len(rows[-1]) == 2 \
+                or str(rows[-1][0].callback_data).startswith(("done:", "undo:")):
+            rows.append([b])
+        else:
+            rows[-1].append(b)
+    rows += [list(r) for r in extra_rows]
     return InlineKeyboardMarkup(rows) if rows else None
 
 
@@ -147,10 +155,13 @@ def kid_token(kid: Kid) -> str:
     return hashlib.sha1(kid.id.encode()).hexdigest()[:10]
 
 
-def done_button(task: Task, with_kid: bool = False) -> InlineKeyboardButton:
+def done_button(task: Task, with_kid: bool = False, number: Optional[int] = None) -> InlineKeyboardButton:
+    """`number`: the task's number in the message text."""
     label = task.subject or short(task.text)
     if with_kid:
         label = f"{task.kid_name.split()[0]} · {label}"
+    if number:
+        label = f"{number}. {label}"
     return InlineKeyboardButton(f"⬜ {label} {task.due_date:%d/%m}", callback_data=f"done:{task.id}")
 
 
@@ -475,12 +486,12 @@ class Bot:
         lines = [f"<b>{title}</b>"]
         kid = None
         tasks = sorted(tasks, key=lambda t: (t.kid_name, t.due_date, t.id))  # one block per kid
-        for task in tasks:
+        for i, task in enumerate(tasks, 1):
             if task.kid_name != kid:
                 kid = task.kid_name
                 lines.append(f"\n👦 <b>{e(kid)}</b>")
-            lines.append(f"• {e(task.title)} <i>(ל-{task.due_date:%d/%m})</i>")
-        return "\n".join(lines), [done_button(t, with_kid=True) for t in tasks]
+            lines.append(f"{i}. {e(task.title)} <i>(ל-{task.due_date:%d/%m})</i>")
+        return "\n".join(lines), [done_button(t, with_kid=True, number=i) for i, t in enumerate(tasks, 1)]
 
     # --- commands -------------------------------------------------------
 

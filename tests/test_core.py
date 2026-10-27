@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from telegram import InlineKeyboardButton
 
 from webtop_bot.bot import message_visible
 from webtop_bot.homework import Event, Kid, Lesson, WebtopDataError, _checked, _merge_teachers
@@ -736,3 +737,22 @@ def test_botCode_serviceCalls_allExistOnService() -> None:
 
     # Assert
     assert used and missing == []
+
+
+def test_tasksList_renderTasks_numberedAndOneTaskButtonPerRow() -> None:
+    # Arrange
+    from webtop_bot.bot import Bot, keyboard
+
+    due = dt.date(2026, 10, 27)
+    tasks = [SimpleNamespace(id=i, kid_name=kid, due_date=due, title=f"t{i}", subject=f"s{i}", text="")
+             for i, kid in ((1, "יואב א"), (2, "נדב א"), (3, "יואב א"))]
+    extra = [[InlineKeyboardButton("a", callback_data="x:a"), InlineKeyboardButton("b", callback_data="x:b")]]
+
+    # Act
+    text, buttons = Bot.render_tasks(tasks, "📋")
+    rows = keyboard(buttons, extra).inline_keyboard
+
+    # Assert
+    assert "1. t1" in text and "2. t3" in text and "3. t2" in text  # grouped by kid, numbered in order shown
+    assert [[b.text for b in row] for row in rows] == [
+        ["⬜ 1. יואב · s1 27/10"], ["⬜ 2. יואב · s3 27/10"], ["⬜ 3. נדב · s2 27/10"], ["a", "b"]]
