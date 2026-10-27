@@ -693,6 +693,34 @@ class TestInbox:
         assert [m.id for m in store.messages(10)] == [a.id]
         assert store.message(b.id).status == "read"
 
+    def test_25Messages_messagesScreen_pagedByTen(self, tmp_path: Path, monkeypatch) -> None:
+        # Arrange
+        for name, value in (("WEBTOP_USERNAME", "u"), ("WEBTOP_PASSWORD", "p"), ("TELEGRAM_BOT_TOKEN", "1:abc"),
+                            ("DATA_DIR", str(tmp_path))):
+            monkeypatch.setenv(name, value)
+        from webtop_bot.bot import Bot
+        from webtop_bot.config import Config
+        from webtop_bot.service import Service
+
+        cfg = Config.from_env()
+        store = Store(tmp_path / "bot.db")
+        store.add_messages([Header(f"m{i}", dt.datetime(2026, 10, 1 + i), "מורה", f"s{i}", False) for i in range(25)],
+                           notified=True)
+        bot = Bot(cfg, Service(cfg, store, None))
+
+        # Act
+        pages = [bot._messages_screen(1, archived=False, page=p) for p in (0, 1, 2)]
+
+        # Assert
+        def data(rows):
+            return [b.callback_data for row in rows for b in row]
+
+        assert [sum(d.startswith("msg:") for d in data(rows)) for _, rows in pages] == [10, 10, 5]
+        assert "msgl:inbox.1" in data(pages[0][1]) and "msgl:inbox.0" not in data(pages[0][1])
+        assert {"msgl:inbox.0", "msgl:inbox.2"} <= set(data(pages[1][1]))
+        assert "msgl:inbox.3" not in data(pages[2][1])
+        assert "21. " in pages[2][0] and "עמוד 3 מתוך 3" in pages[2][0]
+
 
 def test_botCode_serviceCalls_allExistOnService() -> None:
     # Arrange: every self.service.<name> the bot uses (catches a class cut short by a stray top-level def)

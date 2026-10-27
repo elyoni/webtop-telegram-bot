@@ -604,10 +604,15 @@ class Bot:
         text, rows = self._messages_screen(update.effective_user.id, archived=False)
         await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
 
-    def _messages_screen(self, user_id: int, archived: bool) -> Tuple[str, List[Buttons]]:
-        """The inbox (⭐ important first) or the archive (messages marked read): tap one to read it."""
+    def _messages_screen(self, user_id: int, archived: bool, page: int = 0) -> Tuple[str, List[Buttons]]:
+        """The inbox (⭐ important first) or the archive (messages marked read), MESSAGE_LIST
+        per page: tap one to read it."""
         hidden = self.store.hidden_kids(user_id)
-        messages = [m for m in self.store.messages(MESSAGE_LIST * 3, archived) if message_visible(m, hidden)][:MESSAGE_LIST]
+        visible = [m for m in self.store.messages(archived=archived) if message_visible(m, hidden)]
+        pages = max(1, -(-len(visible) // MESSAGE_LIST))
+        page = min(max(page, 0), pages - 1)
+        first = page * MESSAGE_LIST
+        messages = visible[first : first + MESSAGE_LIST]
         btn = InlineKeyboardButton
         if archived:
             title = "🗄 <b>ארכיון</b> — הודעות שסומנו כנקראו"
@@ -615,32 +620,42 @@ class Bot:
         else:
             title = "✉️ <b>הודעות מורים</b>"
             controls = [btn(f"🗄 ארכיון ({self.store.message_count(archived=True)})", callback_data="msgl:archive")]
-            if any(m.status == "" for m in messages):
+            if any(m.status == "" for m in visible):
                 controls.append(btn("✔️ סימון הכל כנקרא", callback_data="msgl:readall"))
         if not messages:
             return f"{title}\n\n{'📭 ריק' if archived else '🎉 אין הודעות שלא נקראו'}", [controls]
         kids = self._kid_first_names()
         lines = [f"{title} — לחצו לקריאה", ""]
         buttons: Buttons = []
-        for i, m in enumerate(messages, 1):
+        for i, m in enumerate(messages, first + 1):
             names = ", ".join(kids[k] for k in m.kid_ids if k in kids)
             star = "⭐ " if m.status == "important" else ""
             line = f"{i}. {star}{m.header.sent_at:%d/%m} · {e(m.header.sender)} — <b>{e(m.header.subject)}</b>"
             line += (f" ({e(names)})" if names else "") + (" 📎" if m.header.has_files else "")
             lines.append(line)
             buttons.append(btn(f"{i}. {star}{short(m.header.subject, 26)}", callback_data=f"msg:{m.id}"))
-        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)] + [controls]
-        if archived and self.store.message_count(archived=True) > len(messages):
-            lines.append(f"\n(מוצגות {len(messages)} האחרונות)")
-        return "\n".join(lines), rows
+        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+        if pages > 1:
+            lines.append(f"\n(עמוד {page + 1} מתוך {pages} · {len(visible)} הודעות)")
+            where = "archive" if archived else "inbox"
+            nav = []
+            if page > 0:
+                nav.append(btn("➡️ חדשות יותר", callback_data=f"msgl:{where}.{page - 1}"))
+            if page < pages - 1:
+                nav.append(btn("ישנות יותר ⬅️", callback_data=f"msgl:{where}.{page + 1}"))
+            rows.append(nav)
+        return "\n".join(lines), rows + [controls]
 
     async def _messages_list_action(self, query: CallbackQuery, op: str) -> None:
-        if op == "readall":
+        """msgl:inbox / msgl:archive (optionally ".<page>"), or msgl:readall."""
+        where, _, page = op.partition(".")
+        if where == "readall":
             self.store.archive_messages()
             await query.answer("✔️ הכל סומן כנקרא (⭐ חשובות נשארות)")
         else:
             await query.answer()
-        await self._edit(query, *self._messages_screen(query.from_user.id, archived=op == "archive"))
+        page_no = int(page) if page.isdigit() else 0
+        await self._edit(query, *self._messages_screen(query.from_user.id, archived=where == "archive", page=page_no))
 
     async def _message_status(self, query: CallbackQuery, raw: str) -> None:
         """✔️ / ↩️ / ⭐ / ☆ on a message: change its status and redraw its buttons."""

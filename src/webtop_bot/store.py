@@ -737,11 +737,12 @@ class Store:
         row = self._db.execute(f"SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?", (message_id,)).fetchone()
         return _message(row) if row else None
 
-    def messages(self, limit: int, archived: bool = False) -> List[Message]:
-        """The inbox (important ones first) or the archive (messages marked read); newest first."""
+    def messages(self, limit: Optional[int] = None, archived: bool = False) -> List[Message]:
+        """The inbox (important ones first) or the archive (messages marked read); newest first.
+        No limit: all of them."""
         where, order = ("status = 'read'", "") if archived else ("status != 'read'", "status = 'important' DESC, ")
         rows = self._db.execute(
-            f"SELECT {MESSAGE_COLUMNS} FROM messages WHERE {where} ORDER BY {order}sent_at DESC, id DESC LIMIT ?", (limit,)
+            f"SELECT {MESSAGE_COLUMNS} FROM messages WHERE {where} ORDER BY {order}sent_at DESC, id DESC LIMIT ?", (-1 if limit is None else limit,)
         )
         return [_message(r) for r in rows]
 
