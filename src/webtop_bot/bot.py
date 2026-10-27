@@ -151,7 +151,7 @@ def done_button(task: Task, with_kid: bool = False) -> InlineKeyboardButton:
     label = task.subject or short(task.text)
     if with_kid:
         label = f"{task.kid_name.split()[0]} · {label}"
-    return InlineKeyboardButton(f"✅ {label} {task.due_date:%d/%m}", callback_data=f"done:{task.id}")
+    return InlineKeyboardButton(f"⬜ {label} {task.due_date:%d/%m}", callback_data=f"done:{task.id}")
 
 
 def event_kind(ev: Event, chosen: Dict[str, str]) -> str:
@@ -498,7 +498,7 @@ class Bot:
             "☰ עוד — ⬅️ אתמול, 🗓 השבוע, ✉️ הודעות מורים, 🎒 חוגים ותזכורות, 🔄 עדכון (פעם ב-30 דק׳), ⚙️ הגדרות, ℹ️ גרסה\n"
             "✉️ הודעה חדשה מהמורים נשלחת לכאן במלואה (וב-Webtop תסומן כנקראה): "
             "✔️ נקרא — לארכיון, ⭐ חשוב — נשארת בראש הרשימה\n"
-            "✅ סימון משימה כבוצעה (↩️ ביטול)\n\n"
+            "⬜ לחיצה על משימה מסמנת אותה כבוצעה ✅ (לחיצה נוספת מבטלת)\n\n"
             "<b>סימנים</b>\n"
             "✅ משימה בוצעה\n"
             "⬜ משימה פתוחה\n"
@@ -1359,7 +1359,7 @@ class Bot:
             await self.commands[name](update, context)
 
     async def _toggle_done(self, query: CallbackQuery, task_id: int, done: bool) -> None:
-        """Mark done / undo, swapping the pressed button between ✅ and ↩️."""
+        """Mark done / undo, like a checkbox: the pressed button swaps between ⬜ (open) and ✅ (done)."""
         task = await self.service.complete(task_id, completed=done)
         if not task:
             await query.answer("Task not found")
@@ -1369,10 +1369,10 @@ class Bot:
         def swap(button: InlineKeyboardButton) -> InlineKeyboardButton:
             if button.callback_data != query.data:
                 return button
-            label = button.text.split(" ", 1)[-1]  # drop the ✅ / ↩️ prefix
+            label = button.text.split(" ", 1)[-1]  # drop the ⬜ / ✅ prefix
             if done:
-                return InlineKeyboardButton(f"↩️ {label}", callback_data=f"undo:{task.id}")
-            return InlineKeyboardButton(f"✅ {label}", callback_data=f"done:{task.id}")
+                return InlineKeyboardButton(f"✅ {label}", callback_data=f"undo:{task.id}")
+            return InlineKeyboardButton(f"⬜ {label}", callback_data=f"done:{task.id}")
 
         rows = query.message.reply_markup.inline_keyboard if query.message.reply_markup else ()
         await query.edit_message_reply_markup(InlineKeyboardMarkup([[swap(b) for b in row] for row in rows]))
