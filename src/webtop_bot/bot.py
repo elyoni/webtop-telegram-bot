@@ -9,7 +9,7 @@ import logging
 import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from telegram import Bot as TelegramBot
 from telegram import (
@@ -95,6 +95,12 @@ Handler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 Message = Tuple[str, Buttons]
 
 
+def with_footer(messages: List[Message], footer: str) -> List[Message]:
+    """`footer` (e.g. the last update time) added to the last message only."""
+    *rest, (text, buttons) = messages
+    return [*rest, (f"{text}\n\n{footer}", buttons)]
+
+
 def e(text: str) -> str:
     return html.escape(text, quote=False)
 
@@ -155,11 +161,9 @@ def kid_token(kid: Kid) -> str:
     return hashlib.sha1(kid.id.encode()).hexdigest()[:10]
 
 
-def done_button(task: Task, with_kid: bool = False, number: Optional[int] = None) -> InlineKeyboardButton:
+def done_button(task: Task, number: Optional[int] = None) -> InlineKeyboardButton:
     """`number`: the task's number in the message text."""
     label = task.subject or short(task.text)
-    if with_kid:
-        label = f"{task.kid_name.split()[0]} · {label}"
     if number:
         label = f"{number}. {label}"
     return InlineKeyboardButton(f"⬜ {label} {task.due_date:%d/%m}", callback_data=f"done:{task.id}")
@@ -359,18 +363,19 @@ class Bot:
             await update.effective_message.reply_text(f"⚠️ שגיאה: {e(str(context.error))[:300]}")
 
     async def broadcast(
-        self, context: ContextTypes.DEFAULT_TYPE, make: Callable[[set[str]], Optional[Message]],
+        self, context: ContextTypes.DEFAULT_TYPE, make: Callable[[set[str]], Union[None, Message, List[Message]]],
         chat_ids: Optional[Iterable[int]] = None, files: Sequence[Path] = (),
     ) -> None:
-        """Send each chat (default: every allowed one) make(its hidden kid ids); None skips
-        that chat. A private chat's id is its user's id, so each user gets their own kids.
+        """Send each chat (default: every allowed one) make(its hidden kid ids): a message or
+        several (one per kid); None skips that chat. A private chat's id is its user's id, so each user gets their own kids.
         `files` (message attachments) follow the message as documents."""
         for chat_id in self.allowed_ids() if chat_ids is None else chat_ids:
-            message = make(self.store.hidden_kids(chat_id))
-            if not message:
+            made = make(self.store.hidden_kids(chat_id))
+            if not made:
                 continue
             try:  # one blocked / deleted chat mustn't stop the others
-                await self._send_chunks(lambda t, m: context.bot.send_message(chat_id, t, reply_markup=m), *message)
+                for message in made if isinstance(made, list) else [made]:
+                    await self._send_chunks(lambda t, m: context.bot.send_message(chat_id, t, reply_markup=m), *message)
                 for path in files:
                     await context.bot.send_document(chat_id, path, filename=attachment_name(path))
             except Exception as ex:
@@ -380,6 +385,11 @@ class Bot:
         await self._send_chunks(
             lambda t, m: update.effective_message.reply_text(t, reply_markup=m), text, buttons, extra_rows
         )
+
+    async def reply_all(self, update: Update, messages: List[Message], extra_rows: Sequence[Buttons] = ()) -> None:
+        """One message each (e.g. per kid, to forward); `extra_rows` go under the last."""
+        for i, (text, buttons) in enumerate(messages):
+            await self.reply(update, text, buttons, extra_rows if i == len(messages) - 1 else ())
 
     @staticmethod
     async def _send_chunks(send, text: str, buttons: Buttons, extra_rows: Sequence[Buttons] = ()) -> None:
@@ -400,21 +410,21 @@ class Bot:
     def render(
         self, kid_lessons: Sequence[Tuple[Kid, List[Lesson]]], days: List[dt.date],
         hidden: set[str] = frozenset(), events: Optional[List[Event]] = None,
-    ) -> Tuple[str, Buttons, List[int]]:
-        """Text, buttons and the ids of the homework tasks shown, skipping hidden kids.
-        `events` defaults to the teachers' notes on `days`."""
+    ) -> Tuple[List[Message], List[int]]:
+        """One message per kid (to forward to that kid), and the ids of the homework tasks
+        shown, skipping hidden kids. `events` defaults to the teachers' notes on `days`."""
         if events is None:
             events = self.store.events(days)
         kid_lessons = [(kid, lessons) for kid, lessons in kid_lessons if kid.id not in hidden]
         if not kid_lessons and hidden:
-            return "כל הילדים מוסתרים — ⚙️ /config", [], []
-        parts: List[str] = []
-        buttons: Buttons = []
+            return [("כל הילדים מוסתרים — ⚙️ /config", [])], []
+        messages: List[Message] = []
         shown: List[int] = []
         kinds = self.store.event_kinds()
         activities = {day: self.store.activities_on(day) for day in days}
         for kid, lessons in kid_lessons:
             lines = [f"👦 <b>{e(kid.name)}</b> ({kid.class_label})"]
+            buttons: Buttons = []
             for day in days:
                 # Multi-day views skip lessons the teacher left empty, to stay short.
                 todays = [l for l in lessons if l.date == day and (len(days) == 1 or l.topic or homework_text(l))]
@@ -443,7 +453,7 @@ class Bot:
                     if status and status.id not in shown:  # lessons can share one task
                         shown.append(status.id)
                         if not status.completed:
-                            buttons.append(done_button(status, with_kid=len(kid_lessons) > 1))
+                            buttons.append(done_button(status))
                     if task:
                         lines.append(f"    <i>{e(text)}</i>")
                 lines += [activity_line(a) for a in activities[day] if a.kid_id == kid.id]
@@ -451,47 +461,48 @@ class Bot:
             if kid_events:
                 lines.append("\n<u>הערות מורים</u>")
                 lines += [event_line(ev, event_kind(ev, kinds)) for ev in kid_events]
-            parts.append("\n".join(lines))
-        return "\n\n".join(parts) or "אין נתונים", buttons, shown
+            messages.append(("\n".join(lines), buttons))
+        return messages or [("אין נתונים", [])], shown
 
     def render_schedule(
         self, kid_lessons: Sequence[Tuple[Kid, List[Lesson]]], day: dt.date, hidden: set[str]
-    ) -> str:
-        """The day's timetable (hour and subject), its activities and the reminders matching it."""
+    ) -> List[str]:
+        """Per kid: the day's timetable (hour and subject), activities and the reminders matching it."""
         kid_lessons = [(kid, lessons) for kid, lessons in kid_lessons if kid.id not in hidden]
         if not kid_lessons:
-            return "כל הילדים מוסתרים — ⚙️ /config" if hidden else "אין נתונים"
+            return ["כל הילדים מוסתרים — ⚙️ /config" if hidden else "אין נתונים"]
         activities = self.store.activities_on(day)
-        parts = []
+        reminders = self.service.reminders_for(day)
+        texts = []
         for kid, lessons in kid_lessons:
-            lines = [f"👦 <b>{e(kid.name)}</b> ({kid.class_label})"]
+            lines = [f"<u>{day_label(day)}</u>\n", f"👦 <b>{e(kid.name)}</b> ({kid.class_label})"]
             lines += [f"{l.hour}. {e(l.subject)}" for l in lessons if l.date == day] or ["אין שיעורים"]
             lines += [activity_line(a) for a in activities if a.kid_id == kid.id]
-            parts.append("\n".join(lines))
-        text = f"<u>{day_label(day)}</u>\n\n" + "\n\n".join(parts)
-        reminders = [r for r in self.service.reminders_for(day) if r.kid_id not in hidden]
-        return text + (f"\n\n{self.render_reminders(reminders)}" if reminders else "")
+            kid_reminders = [r for r in reminders if r.kid_id == kid.id]
+            if kid_reminders:
+                lines.append(f"\n{self.render_reminders(kid_reminders)}")
+            texts.append("\n".join(lines))
+        return texts
 
     @staticmethod
     def render_reminders(reminders: Sequence[Reminder]) -> str:
         lines = [f"• {e(r.kid_name.split()[0])} · {e(r.matched)} — {e(r.note)}" for r in reminders]
         return "🔔 <b>לזכור</b>\n" + "\n".join(lines)
 
-    def _tasks_message(self, tasks: List[Task], title: str, hidden: set[str]) -> Optional[Message]:
+    def _tasks_message(self, tasks: List[Task], title: str, hidden: set[str]) -> Optional[List[Message]]:
         tasks = [t for t in tasks if t.kid_id not in hidden]
         return self.render_tasks(tasks, title) if tasks else None
 
     @staticmethod
-    def render_tasks(tasks: List[Task], title: str) -> Tuple[str, Buttons]:
-        lines = [f"<b>{title}</b>"]
-        kid = None
-        tasks = sorted(tasks, key=lambda t: (t.kid_name, t.due_date, t.id))  # one block per kid
-        for i, task in enumerate(tasks, 1):
-            if task.kid_name != kid:
-                kid = task.kid_name
-                lines.append(f"\n👦 <b>{e(kid)}</b>")
-            lines.append(f"{i}. {e(task.title)} <i>(ל-{task.due_date:%d/%m})</i>")
-        return "\n".join(lines), [done_button(t, with_kid=True, number=i) for i, t in enumerate(tasks, 1)]
+    def render_tasks(tasks: List[Task], title: str) -> List[Message]:
+        """One numbered message per kid (to forward to that kid)."""
+        messages = []
+        for kid in sorted({t.kid_name for t in tasks}):
+            kid_tasks = sorted((t for t in tasks if t.kid_name == kid), key=lambda t: (t.due_date, t.id))
+            lines = [f"<b>{title}</b>", "", f"👦 <b>{e(kid)}</b>"]
+            lines += [f"{i}. {e(t.title)} <i>(ל-{t.due_date:%d/%m})</i>" for i, t in enumerate(kid_tasks, 1)]
+            messages.append(("\n".join(lines), [done_button(t, number=i) for i, t in enumerate(kid_tasks, 1)]))
+        return messages
 
     # --- commands -------------------------------------------------------
 
@@ -552,9 +563,11 @@ class Bot:
             await self.reply(update, f"אין נתונים שמורים לתאריך הזה (שמור: {span}).\n{self.freshness()}")
             return
         hidden = self.store.hidden_kids(update.effective_user.id)
-        text, buttons, shown = self.render(self.service.view(days), days, hidden=hidden)
+        messages, shown = self.render(self.service.view(days), days, hidden=hidden)
         self.store.mark_notified(shown)
-        await self.reply(update, f"{text}\n\n{self.freshness()}", buttons)
+        if len(days) == 1:  # multi-day views label each day themselves
+            messages = [(f"<u>{day_label(days[0])}</u>\n\n{text}", buttons) for text, buttons in messages]
+        await self.reply_all(update, with_footer(messages, self.freshness()))
 
     async def cmd_today(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._show(update, [self.cfg.today()])
@@ -568,7 +581,7 @@ class Bot:
             await self.reply(update, f"אין נתונים שמורים למחר.\n{self.freshness()}")
             return
         hidden = self.store.hidden_kids(update.effective_user.id)
-        await self.reply(update, self.render_schedule(self.service.view([day]), day, hidden))
+        await self.reply_all(update, [(text, []) for text in self.render_schedule(self.service.view([day]), day, hidden)])
 
     async def cmd_week(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         today = self.cfg.today()
@@ -585,8 +598,7 @@ class Bot:
         if not tasks:
             await self.reply(update, "🎉 אין משימות פתוחות", extra_rows=controls)
             return
-        text, buttons = self.render_tasks(tasks, "📋 משימות פתוחות")
-        await self.reply(update, text, buttons, controls)
+        await self.reply_all(update, self.render_tasks(tasks, "📋 משימות פתוחות"), controls)
 
     async def cmd_sync(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Manual Webtop update, rate limited (SYNC_COOLDOWN_MINUTES, shared by all users)."""
@@ -1469,14 +1481,15 @@ class Bot:
             events = self.store.events([today], added_after=self.settings.last_digest(user_id))
             sent_at = utc_now()
 
-            def make(hidden: set[str], events: List[Event] = events) -> Optional[Message]:
+            def make(hidden: set[str], events: List[Event] = events) -> Optional[List[Message]]:
                 visible = [lessons for kid, lessons in view if kid.id not in hidden]
                 visible_ids = {kid.id for kid, _ in view if kid.id not in hidden}
                 if not any(visible) and not any(ev.kid_id in visible_ids for ev in events):
                     return None  # no school today (holiday, or nothing synced)
-                text, buttons, shown = self.render(view, [today], hidden=hidden, events=events)
+                messages, shown = self.render(view, [today], hidden=hidden, events=events)
                 self.store.mark_notified(shown)
-                return f"📚 <b>סיכום {day_label(today)}</b>\n\n{text}\n\n{self.freshness()}", buttons
+                title = f"📚 <b>סיכום {day_label(today)}</b>"
+                return with_footer([(f"{title}\n\n{text}", buttons) for text, buttons in messages], self.freshness())
 
             await self.broadcast(context, make, chat_ids=[user_id])
             self.settings.set_last_digest(user_id, sent_at)
@@ -1489,15 +1502,18 @@ class Bot:
         tasks = [t for t in self.store.open_tasks(due_from=self.cfg.today()) if t.due_date <= day]
         reminders = self.service.reminders_for(day)
 
-        def make(hidden: set[str]) -> Optional[Message]:
-            visible = [t for t in tasks if t.kid_id not in hidden]
-            notes = [r for r in reminders if r.kid_id not in hidden]
-            texts, buttons = [], []
-            if visible:
-                text, buttons = self.render_tasks(visible, "⏰ תזכורת: משימות פתוחות למחר")
-                texts.append(text)
-            if notes:
-                texts.append(self.render_reminders(notes))
-            return ("\n\n".join(texts), buttons) if texts else None
+        def make(hidden: set[str]) -> List[Message]:
+            """Per kid: open tasks, then the reminders."""
+            messages = []
+            for kid_id in sorted(({t.kid_id for t in tasks} | {r.kid_id for r in reminders}) - hidden,
+                                 key=lambda k: next(x.kid_name for x in [*tasks, *reminders] if x.kid_id == k)):
+                kid_tasks = [t for t in tasks if t.kid_id == kid_id]
+                notes = [r for r in reminders if r.kid_id == kid_id]
+                text, buttons = (self.render_tasks(kid_tasks, "⏰ תזכורת: משימות פתוחות למחר")[0] if kid_tasks
+                                 else ("", []))
+                if notes:
+                    text = f"{text}\n\n{self.render_reminders(notes)}" if text else self.render_reminders(notes)
+                messages.append((text, buttons))
+            return messages
 
         await self.broadcast(context, make, chat_ids=context.job.data)

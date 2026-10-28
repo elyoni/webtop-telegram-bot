@@ -774,7 +774,7 @@ def test_botCode_serviceCalls_allExistOnService() -> None:
     assert used and missing == []
 
 
-def test_tasksList_renderTasks_numberedAndOneTaskButtonPerRow() -> None:
+def test_tasksList_renderTasks_messagePerKidNumberedOneButtonPerRow() -> None:
     # Arrange
     from webtop_bot.bot import Bot, keyboard
 
@@ -784,10 +784,11 @@ def test_tasksList_renderTasks_numberedAndOneTaskButtonPerRow() -> None:
     extra = [[InlineKeyboardButton("a", callback_data="x:a"), InlineKeyboardButton("b", callback_data="x:b")]]
 
     # Act
-    text, buttons = Bot.render_tasks(tasks, "📋")
-    rows = keyboard(buttons, extra).inline_keyboard
+    (yoav, yoav_buttons), (nadav, nadav_buttons) = Bot.render_tasks(tasks, "📋")
+    rows = keyboard(yoav_buttons, extra).inline_keyboard
 
     # Assert
-    assert "1. t1" in text and "2. t3" in text and "3. t2" in text  # grouped by kid, numbered in order shown
-    assert [[b.text for b in row] for row in rows] == [
-        ["⬜ 1. יואב · s1 27/10"], ["⬜ 2. יואב · s3 27/10"], ["⬜ 3. נדב · s2 27/10"], ["a", "b"]]
+    assert "יואב" in yoav and "1. t1" in yoav and "2. t3" in yoav and "נדב" not in yoav
+    assert "נדב" in nadav and "1. t2" in nadav and "יואב" not in nadav
+    assert [[b.text for b in row] for row in rows] == [["⬜ 1. s1 27/10"], ["⬜ 2. s3 27/10"], ["a", "b"]]
+    assert [b.text for b in nadav_buttons] == ["⬜ 1. s2 27/10"]
