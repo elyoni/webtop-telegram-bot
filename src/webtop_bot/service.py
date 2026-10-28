@@ -79,6 +79,8 @@ class Service:
         self._lock = asyncio.Lock()  # Webtop refresh
         self._todo_lock = asyncio.Lock()  # task-app push / pull
         self._inbox_lock = asyncio.Lock()  # Webtop messages
+        for message_id in store.removed_message_ids:  # duplicates merged by the store
+            shutil.rmtree(self._files_dir(message_id), ignore_errors=True)
 
     # --- reading (local db only) ----------------------------------------
 

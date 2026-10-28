@@ -589,8 +589,9 @@ class TestMoreMenu:
         assert names <= set(bot.commands)
 
 
-def header(webtop_id: str, hour: int = 10) -> Header:
-    return Header(webtop_id, dt.datetime(2026, 10, 26, hour), "מיכל אהרוני", "טיול", False)
+def header(webtop_id: str, hour: int = 10, subject: str = "") -> Header:
+    """A message; a different id is a different message unless `subject` is given."""
+    return Header(webtop_id, dt.datetime(2026, 10, 26, hour), "מיכל אהרוני", subject or f"טיול {webtop_id}", False)
 
 
 class TestInbox:
@@ -693,6 +694,40 @@ class TestInbox:
         # Assert
         assert [m.id for m in store.messages(10)] == [a.id]
         assert store.message(b.id).status == "read"
+
+    def test_sameMessageNewDailyId_addMessages_notAddedAgainAndIdUpdated(self, store: Store) -> None:
+        # Arrange
+        (msg,) = store.add_messages([header("monday-id", subject="טיול")], notified=True)
+        store.set_message_status(msg.id, "read")
+
+        # Act
+        added = store.add_messages([header("tuesday-id", subject="טיול")], notified=False)
+
+        # Assert
+        assert added == []
+        assert store.message(msg.id).header.webtop_id == "tuesday-id"
+        assert store.message(msg.id).status == "read"
+        assert store.message_count(archived=True) == 1
+
+    def test_dbWithDailyDuplicates_open_mergedIntoFirstWithNewestId(self, tmp_path: Path) -> None:
+        # Arrange: rows as stored by 0.5.x, one copy per day
+        store = Store(tmp_path / "bot.db")
+        (first,) = store.add_messages([header("x")], notified=True)
+        for webtop_id in ("day2", "day3"):
+            store._db.execute("INSERT INTO messages (webtop_id, sent_at, sender, subject, has_files, notified) "
+                              "SELECT ?, sent_at, sender, subject, has_files, 1 FROM messages WHERE id = ?",
+                              (webtop_id, first.id))
+        store.set_message_status(first.id, "read")
+        store._db.commit()
+
+        # Act
+        reopened = Store(tmp_path / "bot.db")
+
+        # Assert
+        assert reopened.removed_message_ids == [first.id + 1, first.id + 2]
+        assert [(m.id, m.header.webtop_id, m.status) for m in reopened.messages(archived=True)] == [
+            (first.id, "day3", "read")]
+        assert reopened.message_count(archived=False) == 0
 
     def test_25Messages_messagesScreen_pagedByTen(self, tmp_path: Path, monkeypatch) -> None:
         # Arrange

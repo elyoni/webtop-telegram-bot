@@ -23,7 +23,7 @@ SIZE_UNITS = {"B": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3}
 @dataclass(frozen=True)
 class Header:
     """A message as listed in the inbox."""
-    webtop_id: str  # Webtop's messageId; stays the same across logins
+    webtop_id: str  # Webtop's messageId; changes daily (an encrypted token), so not a key
     sent_at: dt.datetime
     sender: str
     subject: str

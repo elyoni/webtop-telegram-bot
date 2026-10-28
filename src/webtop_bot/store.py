@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS events (       -- teacher notes from Webtop ("מיל�
 );
 CREATE TABLE IF NOT EXISTS messages (     -- the Webtop inbox (teachers' messages)
     id INTEGER PRIMARY KEY,
-    webtop_id TEXT NOT NULL UNIQUE,       -- Webtop's messageId
+    webtop_id TEXT NOT NULL UNIQUE,       -- Webtop's messageId: changes daily, so messages are matched by sent_at+sender+subject
     sent_at TEXT NOT NULL,
     sender TEXT NOT NULL,
     subject TEXT NOT NULL,
@@ -247,11 +247,29 @@ class Store:
         self._add_column("activities", "start_time", "TEXT NOT NULL DEFAULT ''")  # "HH:MM"
         self._add_column("activities", "end_time", "TEXT NOT NULL DEFAULT ''")
         self._add_column("messages", "status", "TEXT NOT NULL DEFAULT ''")  # '' | important | read (archived)
+        self.removed_message_ids = self._merge_duplicate_messages()  # their attachment folders to delete
 
     def _add_column(self, table: str, column: str, definition: str) -> None:
         if column not in {r[1] for r in self._db.execute(f"PRAGMA table_info({table})")}:
             self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             self._db.commit()
+
+    def _merge_duplicate_messages(self) -> List[int]:
+        """Older versions took Webtop's messageId as stable, but it changes daily, so every
+        message was stored (and announced) again each day. Keep the first copy (and its
+        status) with the newest id; returns the removed rows' ids."""
+        db = self._db
+        removed = []
+        rows = db.execute("SELECT id, webtop_id, sent_at, sender, subject FROM messages ORDER BY id").fetchall()
+        first: Dict[tuple, int] = {}
+        for row_id, webtop_id, *key in rows:
+            keep = first.setdefault(tuple(key), row_id)
+            if keep != row_id:
+                db.execute("DELETE FROM messages WHERE id = ?", (row_id,))
+                db.execute("UPDATE messages SET webtop_id = ? WHERE id = ?", (webtop_id, keep))
+                removed.append(row_id)
+        db.commit()
+        return removed
 
     def _migrate_kid_ids(self) -> None:
         """Older versions keyed kids by Webtop's id, which changes on every login,
@@ -713,13 +731,21 @@ class Store:
         return self._db.execute("SELECT 1 FROM messages LIMIT 1").fetchone() is not None
 
     def add_messages(self, headers: List[Header], notified: bool) -> List[Message]:
-        """Store the messages not seen before; returns them."""
+        """Store the messages not seen before; returns them. Known ones (same time, sender
+        and subject) only get today's webtop_id, which opening them needs."""
         added = []
         for h in headers:
+            key = (h.sent_at.isoformat(), h.sender, h.subject)
+            known = self._db.execute(
+                "SELECT id FROM messages WHERE sent_at = ? AND sender = ? AND subject = ?", key
+            ).fetchone()
+            if known:
+                self._db.execute("UPDATE messages SET webtop_id = ? WHERE id = ?", (h.webtop_id, known[0]))
+                continue
             cur = self._db.execute(
                 "INSERT OR IGNORE INTO messages (webtop_id, sent_at, sender, subject, has_files, notified) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (h.webtop_id, h.sent_at.isoformat(), h.sender, h.subject, int(h.has_files), int(notified)),
+                (h.webtop_id, *key, int(h.has_files), int(notified)),
             )
             if cur.rowcount:
                 added.append(Message(cur.lastrowid, h, None, ()))
